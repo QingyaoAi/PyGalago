@@ -145,7 +145,7 @@ class Retrieval:
             )
         self._pr = pr
 
-        self._ls = self._lengths.stats()
+        self._ls = self._lengths.stats
 
         # Traversals
         self._part_assigner = PartAssignerTraversal(part)

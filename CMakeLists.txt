@@ -77,6 +77,9 @@ add_library(galago STATIC
   src/galago/retrieval/bm25_iterator.cpp
   src/galago/retrieval/score_combination_iterator.cpp
   src/galago/retrieval/ranked_document_model.cpp
+  # Phase 5 — index writer (B-tree writer + posting encoder)
+  src/galago/btree/disk_btree_writer.cpp
+  src/galago/index/index_writer.cpp
 )
 target_include_directories(galago PUBLIC src)
 

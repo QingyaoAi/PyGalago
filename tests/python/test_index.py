@@ -60,8 +60,8 @@ class TestNamesReader:
         assert len(name) > 0
 
     def test_get_name_known_value(self, index):
-        # Robust04 doc 0 is "FBIS3-1"
-        assert index.get_name(0) == "FBIS3-1"
+        # Robust04 doc 0 (FT-sorted build) is "FT931-1"
+        assert index.get_name(0) == "FT931-1"
 
     def test_get_name_out_of_range(self, index):
         # Very large docid — should return empty string, not crash
@@ -83,8 +83,8 @@ class TestLengthsReader:
         assert length > 0
 
     def test_get_length_known_value(self, index):
-        # doc 0 in Robust04 has 913 tokens
-        assert index.get_length(0) == 913
+        # doc 0 (FT931-1) in this Robust04 build has 965 tokens
+        assert index.get_length(0) == 965
 
     def test_total_documents(self, index):
         n = index.total_documents()
@@ -94,7 +94,7 @@ class TestLengthsReader:
         stats = index.get_length_stats()
         assert stats.total_document_count == 528155
         assert stats.collection_length == 252013235
-        assert abs(stats.avg_length - 477.271) < 0.01
+        assert abs(stats.avg_length - 477.158) < 0.01
         assert stats.first_document == 0
         assert stats.last_document > 0
 

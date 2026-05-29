@@ -1,5 +1,5 @@
 // BSD License (http://www.galagosearch.org/license)
-// pybind11 bindings for the galago C++ library — Phase 1, 2 & 3.
+// pybind11 bindings for the galago C++ library — Phase 1, 2, 3 & 5.
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -11,6 +11,7 @@
 #include "galago/index/lengths_reader.h"
 #include "galago/index/postings_reader.h"
 #include "galago/index/disk_index.h"
+#include "galago/index/index_writer.h"
 #include "galago/retrieval/lengths_source.h"
 #include "galago/retrieval/ranked_document_model.h"
 
@@ -218,6 +219,14 @@ PYBIND11_MODULE(_galago, m) {
             return py::cast(PyPostingsIterator{std::move(*it)});
         }, py::arg("term"), py::arg("part") = "postings.krovetz",
            "Return a PostingsIterator for term in the given postings part.")
+        .def("postings_reader", [](DiskIndex& idx, const std::string& part) -> py::object {
+            auto* pr = idx.postings_reader(part);
+            if (!pr) return py::none();
+            return py::cast(pr, py::return_value_policy::reference);
+        }, py::arg("part") = "postings.krovetz",
+           py::keep_alive<1, 0>(),
+           "Return the PostingsReader for the given part, or None.\n"
+           "The reader's lifetime is tied to this DiskIndex.")
         .def_property_readonly("path", &DiskIndex::path);
 
     // ── Phase 3 — retrieval ───────────────────────────────────────────────────
@@ -287,4 +296,50 @@ PYBIND11_MODULE(_galago, m) {
         "Run DAAT BM25 with per-term weights from the query pipeline.\n"
         "weighted_terms: list of (term, weight) tuples.\n"
         "Returns list of ScoredDocument sorted by descending score.");
+
+    // ── Phase 5 — index writers ───────────────────────────────────────────────
+
+    m.def("write_names",
+        [](const std::string& path,
+           const std::vector<std::string>& names,
+           int64_t first_docid) {
+            write_names(path, names, first_docid);
+        },
+        py::arg("path"),
+        py::arg("names"),
+        py::arg("first_docid") = 0,
+        "Write a Galago `names` B-tree file mapping docid → document name.");
+
+    m.def("write_lengths",
+        [](const std::string& path,
+           const std::vector<int32_t>& lengths,
+           int64_t first_docid,
+           const std::string& field) {
+            write_lengths(path, lengths, first_docid, field);
+        },
+        py::arg("path"),
+        py::arg("lengths"),
+        py::arg("first_docid") = 0,
+        py::arg("field")       = "document",
+        "Write a Galago `lengths` B-tree file.");
+
+    m.def("write_postings_index",
+        [](const std::string& path,
+           const std::vector<std::pair<std::string,
+               std::vector<std::pair<int64_t, int32_t>>>>& term_postings,
+           int64_t total_docs,
+           int64_t collection_length) {
+            std::vector<TermPostings> tp;
+            tp.reserve(term_postings.size());
+            for (const auto& [term, posts] : term_postings) {
+                tp.push_back({term, posts});
+            }
+            write_postings_index(path, tp, total_docs, collection_length);
+        },
+        py::arg("path"),
+        py::arg("term_postings"),
+        py::arg("total_docs"),
+        py::arg("collection_length"),
+        "Write a Galago postings B-tree file.\n"
+        "term_postings: list of (term, [(docid, count), ...]) sorted by term.");
 }

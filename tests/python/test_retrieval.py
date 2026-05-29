@@ -69,7 +69,7 @@ class TestBM25Search:
         # Get tf via the postings reader
         idx     = DiskIndex(idx_path)
         lengths = LengthsSource(os.path.join(idx_path, "lengths"))
-        ls      = lengths.stats()
+        ls      = lengths.stats
 
         pit = idx.get_postings("inform")
         assert pit is not None
