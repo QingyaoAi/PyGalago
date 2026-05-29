@@ -35,3 +35,7 @@ _skbuild/
 
 # Temporary / scratch
 /third_party/
+
+# Local test indexes (not committed — use GALAGO_INDEX_PATH env var to point at them)
+index-*/
+*.index/
