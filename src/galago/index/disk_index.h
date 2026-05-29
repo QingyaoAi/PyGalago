@@ -45,6 +45,11 @@ public:
 
     const std::string& path() const { return path_; }
 
+    // Return the raw PostingsReader for a given part name, or nullptr.
+    PostingsReader* postings_reader(const std::string& part = "postings.krovetz") const {
+        return get_postings_reader(part);
+    }
+
 private:
     std::string path_;
 

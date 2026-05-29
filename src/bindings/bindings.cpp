@@ -1,5 +1,5 @@
 // BSD License (http://www.galagosearch.org/license)
-// pybind11 bindings for the galago C++ library — Phase 1 & Phase 2.
+// pybind11 bindings for the galago C++ library — Phase 1, 2 & 3.
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -11,6 +11,8 @@
 #include "galago/index/lengths_reader.h"
 #include "galago/index/postings_reader.h"
 #include "galago/index/disk_index.h"
+#include "galago/retrieval/lengths_source.h"
+#include "galago/retrieval/ranked_document_model.h"
 
 namespace py = pybind11;
 using namespace galago;
@@ -217,4 +219,51 @@ PYBIND11_MODULE(_galago, m) {
         }, py::arg("term"), py::arg("part") = "postings.krovetz",
            "Return a PostingsIterator for term in the given postings part.")
         .def_property_readonly("path", &DiskIndex::path);
+
+    // ── Phase 3 — retrieval ───────────────────────────────────────────────────
+
+    // ScoredDocument
+    py::class_<ScoredDocument>(m, "ScoredDocument")
+        .def_readonly("document", &ScoredDocument::document)
+        .def_readonly("score",    &ScoredDocument::score)
+        .def("__repr__", [](const ScoredDocument& sd) {
+            return "<ScoredDocument doc=" + std::to_string(sd.document)
+                 + " score=" + std::to_string(sd.score) + ">";
+        });
+
+    // LengthsSource — preloaded in-memory lengths array
+    py::class_<LengthsSource>(m, "LengthsSource")
+        .def(py::init<const std::string&, const std::string&>(),
+             py::arg("path"), py::arg("field") = "document",
+             "Load all document lengths from a Galago lengths B-tree file.")
+        .def("length", py::overload_cast<int64_t>(&LengthsSource::length, py::const_),
+             py::arg("docid"))
+        .def_property_readonly("stats", &LengthsSource::stats);
+
+    // BM25Params
+    py::class_<BM25Params>(m, "BM25Params")
+        .def(py::init<>())
+        .def_readwrite("b",             &BM25Params::b)
+        .def_readwrite("k",             &BM25Params::k)
+        .def_readwrite("n",             &BM25Params::n)
+        .def_readwrite("postings_part", &BM25Params::postings_part);
+
+    // bm25_search — main entry point
+    m.def("bm25_search",
+        [](const std::string& index_path,
+           const std::vector<std::string>& terms,
+           double b, double k, int n,
+           const std::string& part) {
+            BM25Params p;
+            p.b = b;  p.k = k;  p.n = n;  p.postings_part = part;
+            return bm25_search(index_path, terms, p);
+        },
+        py::arg("index_path"),
+        py::arg("terms"),
+        py::arg("b")    = 0.75,
+        py::arg("k")    = 1.2,
+        py::arg("n")    = 1000,
+        py::arg("part") = "postings.krovetz",
+        "Run DAAT BM25 retrieval. terms should already be stemmed/normalised.\n"
+        "Returns list of ScoredDocument sorted by descending score.");
 }

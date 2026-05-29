@@ -70,6 +70,13 @@ add_library(galago STATIC
   src/galago/index/lengths_reader.cpp
   src/galago/index/postings_reader.cpp
   src/galago/index/disk_index.cpp
+  # Phase 3 — retrieval iterator framework
+  src/galago/retrieval/lengths_source.cpp
+  src/galago/retrieval/galago_count_iterator.cpp
+  src/galago/retrieval/disjunction_iterator.cpp
+  src/galago/retrieval/bm25_iterator.cpp
+  src/galago/retrieval/score_combination_iterator.cpp
+  src/galago/retrieval/ranked_document_model.cpp
 )
 target_include_directories(galago PUBLIC src)
 
