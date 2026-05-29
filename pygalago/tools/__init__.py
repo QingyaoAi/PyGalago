@@ -1,6 +1,8 @@
-"""pygalago.tools — command-line tools.
+"""pygalago.tools — command-line entry points (Phase 7)."""
 
-Placeholder for Phase 7 implementation.
-"""
+__all__ = ["main"]
 
-__all__: list[str] = []
+
+def main() -> None:
+    from pygalago.tools.cli import main as _main
+    _main()
