@@ -1,9 +1,29 @@
 cmake_minimum_required(VERSION 3.15)
-project(pygalago VERSION 0.1.0 LANGUAGES CXX)
+project(pygalago VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# ── macOS SDK fix ─────────────────────────────────────────────────────────────
+# macOS 26+ (Tahoe) moved libc++ headers into the SDK rather than the CLT
+# tools directory. Detect the active SDK via xcrun and add the C++ headers
+# if they live inside it (they may not on older SDK versions — safe no-op).
+if(APPLE)
+  execute_process(
+    COMMAND xcrun --sdk macosx --show-sdk-path
+    OUTPUT_VARIABLE _MACOS_SDK
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _xcrun_result
+  )
+  if(_xcrun_result EQUAL 0)
+    set(_CXX_INC "${_MACOS_SDK}/usr/include/c++/v1")
+    if(EXISTS "${_CXX_INC}/cstdint")
+      message(STATUS "Adding SDK C++ headers: ${_CXX_INC}")
+      add_compile_options(-I${_CXX_INC})
+    endif()
+  endif()
+endif()
 
 # Compiler warnings
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
