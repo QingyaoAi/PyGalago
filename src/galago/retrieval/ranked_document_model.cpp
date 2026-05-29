@@ -125,4 +125,45 @@ std::vector<ScoredDocument> bm25_search(const std::string&              index_pa
     return bm25_search(index, lengths, terms, params);
 }
 
+// ── bm25_search_weighted ──────────────────────────────────────────────────────
+
+std::vector<ScoredDocument> bm25_search_weighted(
+        DiskIndex&                                         index,
+        LengthsSource&                                     lengths,
+        const std::vector<std::pair<std::string, double>>& weighted_terms,
+        const BM25Params&                                  params) {
+
+    const std::string& part = params.postings_part;
+    PostingsReader*    pr   = index.postings_reader(part);
+
+    std::vector<std::unique_ptr<BM25Iterator>> bm25_iters;
+    std::vector<ScoreIterator*>                score_ptrs;
+    std::vector<double>                        weights;
+
+    for (const auto& [term, w] : weighted_terms) {
+        if (w <= 0.0) continue;
+        auto pit_opt = index.get_postings(term, part);
+        if (!pit_opt) continue;
+
+        BM25Iterator::Params p = pr
+            ? make_bm25_params(lengths, *pr, term, params)
+            : BM25Iterator::Params{};
+        if (p.doc_count == 0) continue;
+
+        auto count_iter = std::make_unique<GalagoCountIterator>(
+            pr, term, std::move(*pit_opt));
+
+        bm25_iters.push_back(std::make_unique<BM25Iterator>(
+            std::move(count_iter), &lengths, p));
+        score_ptrs.push_back(bm25_iters.back().get());
+        weights.push_back(w);
+    }
+
+    if (score_ptrs.empty()) return {};
+    if (score_ptrs.size() == 1) return daat_top_k(*score_ptrs[0], params.n);
+
+    ScoreCombinationIterator combine(score_ptrs, weights);
+    return daat_top_k(combine, params.n);
+}
+
 } // namespace galago

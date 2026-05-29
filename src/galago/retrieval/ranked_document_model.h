@@ -54,4 +54,14 @@ std::vector<ScoredDocument> bm25_search(DiskIndex&                       index,
 // Core DAAT loop — runs over any ScoreIterator tree.
 std::vector<ScoredDocument> daat_top_k(ScoreIterator& root, int n);
 
+// ── Weighted BM25 (Phase 4) ───────────────────────────────────────────────────
+// Run DAAT BM25 with per-term weights supplied by the Python query pipeline.
+// weighted_terms: list of (term, weight) pairs; weights need not sum to 1
+//   (they are passed directly to ScoreCombinationIterator which normalises them).
+std::vector<ScoredDocument> bm25_search_weighted(
+    DiskIndex&                                            index,
+    LengthsSource&                                        lengths,
+    const std::vector<std::pair<std::string, double>>&    weighted_terms,
+    const BM25Params&                                     params = {});
+
 } // namespace galago
