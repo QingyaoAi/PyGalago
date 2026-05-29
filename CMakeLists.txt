@@ -59,11 +59,17 @@ endif()
 
 # ── Core C++ library (libgalago) ──────────────────────────────────────────────
 add_library(galago STATIC
+  # Phase 1 — utility / B-tree
   src/galago/compression/vbyte.cpp
   src/galago/io/file_stream.cpp
   src/galago/btree/vocabulary_reader.cpp
   src/galago/btree/disk_btree_iterator.cpp
   src/galago/btree/disk_btree_reader.cpp
+  # Phase 2 — index part readers
+  src/galago/index/names_reader.cpp
+  src/galago/index/lengths_reader.cpp
+  src/galago/index/postings_reader.cpp
+  src/galago/index/disk_index.cpp
 )
 target_include_directories(galago PUBLIC src)
 

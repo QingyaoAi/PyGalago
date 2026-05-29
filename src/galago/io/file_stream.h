@@ -23,6 +23,9 @@ namespace galago {
 
 class FileStream {
 public:
+    // Default-construct a null/empty stream (is_done() is always true).
+    FileStream() : start_(0), end_(0), pos_(0), file_size_(0) {}
+
     // Open a file for reading.
     explicit FileStream(const std::string& path);
 
