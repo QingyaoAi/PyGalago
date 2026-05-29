@@ -9,7 +9,7 @@ import sys
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="pygalago",
-        description="PyGalago — Galago search engine (Python + C++ port)",
+        description="PyGalago — Python + C++ search engine (no Java required)",
     )
     parser.add_argument(
         "--version", action="version", version="%(prog)s 0.1.0"
