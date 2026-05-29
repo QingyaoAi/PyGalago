@@ -1,0 +1,34 @@
+[build-system]
+requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pygalago"
+version = "0.1.0"
+description = "Python + C++ port of the Galago search engine (no Java required)"
+readme = "README.md"
+license = { text = "BSD" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "pytest-cov",
+]
+eval = [
+    "pytrec-eval-terrier>=0.5",
+]
+stemming = [
+    "PyStemmer>=2.2",
+]
+
+[project.scripts]
+pygalago = "pygalago.tools.cli:main"
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+wheel.packages = ["pygalago"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]

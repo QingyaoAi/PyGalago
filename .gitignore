@@ -1,0 +1,32 @@
+.idea
+nbactions.xml
+nb-configuration.xml
+*.class
+*/target/*
+*.iml
+*.prj
+*.trecrun
+.qwen
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.eggs/
+*.so
+*.pyd
+.pytest_cache/
+.coverage
+
+# C++ build artifacts
+build*/
+cmake-build-*/
+*.o
+*.a
+*.dylib
+*.dll
+
+# Packaging
+*.whl
+_skbuild/
