@@ -21,6 +21,8 @@ dist/
 
 # C++ build artifacts
 build*/
+_build*/
+_bld*/
 cmake-build-*/
 *.o
 *.a
@@ -30,3 +32,6 @@ cmake-build-*/
 # Packaging
 *.whl
 _skbuild/
+
+# Temporary / scratch
+/third_party/
