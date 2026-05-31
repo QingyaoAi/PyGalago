@@ -1,7 +1,7 @@
 # PyGalago
 
 Python + C++ port of the [Galago 3.22](http://sourceforge.net/projects/lemur/) search engine.
-No Java runtime required — `pip install pygalago` is enough.
+No Java runtime required.
 
 ## Why?
 
@@ -11,13 +11,17 @@ No Java runtime required — `pip install pygalago` is enough.
 | Integration | External process / JNI | `import pygalago` |
 | Performance-critical paths | JIT-compiled | C++17 via pybind11 |
 | Scripting | Subprocess calls | Pure Python API |
-| Distribution | JAR + scripts | `pip install pygalago` |
+| Distribution | JAR + scripts | Build from source |
 
 ## Quick start
 
 ```bash
-pip install pygalago
+git clone https://github.com/your-org/pygalago
+cd pygalago
+pip install -e ".[dev,stemming]"
 ```
+
+Requirements: Python ≥ 3.10, CMake ≥ 3.15, a C++17 compiler, pybind11.
 
 ### Build an index
 
@@ -120,17 +124,6 @@ from pygalago.eval import read_qrels, evaluate
 qrels = read_qrels("qrels.txt")
 scores = evaluate({"q1": ["doc1", "doc2"]}, qrels)
 ```
-
-## Building from source
-
-```bash
-git clone https://github.com/your-org/pygalago
-cd pygalago
-pip install -e ".[dev,stemming]"
-pytest
-```
-
-Requirements: Python ≥ 3.10, CMake ≥ 3.15, a C++17 compiler, pybind11.
 
 ## Optional dependencies
 
