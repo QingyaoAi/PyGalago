@@ -176,6 +176,61 @@ void write_lengths(const std::string& path,
     writer.close(manifest);
 }
 
+// ── Positional posting list encoder ──────────────────────────────────────────
+// Writes in PositionIndexCountSource format with positionsByteLen > 0:
+//
+//   VByte(options = HAS_MAXTF)
+//   VByte(documentCount)
+//   VByte(collectionCount)
+//   VByte(maximumCount)
+//   VByte(documentByteLength)
+//   VByte(countsByteLength)
+//   VByte(positionsByteLength)       ← > 0 here (enables read_positions)
+//   [delta-coded docids]
+//   [VByte counts]
+//   [VByte delta-coded positions, reset per document]
+
+std::vector<uint8_t> encode_positional_postings(
+        const std::vector<std::pair<int64_t, std::vector<int32_t>>>& postings) {
+
+    if (postings.empty()) return {};
+
+    int64_t doc_count  = static_cast<int64_t>(postings.size());
+    int64_t coll_count = 0;
+    int64_t max_tf     = 0;
+    for (auto& [d, ps] : postings) {
+        coll_count += static_cast<int64_t>(ps.size());
+        if (static_cast<int64_t>(ps.size()) > max_tf)
+            max_tf = static_cast<int64_t>(ps.size());
+    }
+
+    std::vector<uint8_t> doc_bytes, count_bytes, pos_bytes;
+    int64_t prev_doc = 0;
+    for (auto& [d, ps] : postings) {
+        vbyte_encode_u64(doc_bytes,   static_cast<uint64_t>(d - prev_doc));
+        prev_doc = d;
+        vbyte_encode_u32(count_bytes, static_cast<uint32_t>(ps.size()));
+        int32_t prev_pos = 0;
+        for (int32_t p : ps) {
+            vbyte_encode_u32(pos_bytes, static_cast<uint32_t>(p - prev_pos));
+            prev_pos = p;
+        }
+    }
+
+    std::vector<uint8_t> out;
+    vbyte_encode_u32(out, static_cast<uint32_t>(HAS_MAXTF));
+    vbyte_encode_u64(out, static_cast<uint64_t>(doc_count));
+    vbyte_encode_u64(out, static_cast<uint64_t>(coll_count));
+    vbyte_encode_u64(out, static_cast<uint64_t>(max_tf));
+    vbyte_encode_u64(out, static_cast<uint64_t>(doc_bytes.size()));
+    vbyte_encode_u64(out, static_cast<uint64_t>(count_bytes.size()));
+    vbyte_encode_u64(out, static_cast<uint64_t>(pos_bytes.size()));
+    out.insert(out.end(), doc_bytes.begin(),   doc_bytes.end());
+    out.insert(out.end(), count_bytes.begin(), count_bytes.end());
+    out.insert(out.end(), pos_bytes.begin(),   pos_bytes.end());
+    return out;
+}
+
 // ── Postings index writer ─────────────────────────────────────────────────────
 
 void write_postings_index(const std::string& path,

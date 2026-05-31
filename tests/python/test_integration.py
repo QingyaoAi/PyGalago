@@ -161,7 +161,7 @@ class TestEndToEndSearch:
     def test_retrieval_missing_query_returns_empty(self, mini_index):
         from pygalago.retrieval import Retrieval
         r = Retrieval(mini_index, part="postings")
-        results = r.search("xyzzy_not_a_real_word_abcdef", n=10)
+        results = r.search("xyzzynotarealwordabcdef", n=10)
         assert results == []
 
     def test_retrieval_scores_are_finite(self, mini_index):

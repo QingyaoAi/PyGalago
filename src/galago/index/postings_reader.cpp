@@ -225,4 +225,168 @@ PostingsReader::get_stats(const std::string& term) const {
     return pit->stats();
 }
 
+// ── PostingsReader::read_positions ────────────────────────────────────────────
+
+std::vector<PositionPosting>
+PostingsReader::read_positions(const std::string& term) const {
+    auto it_opt = reader_.get_iterator(term);
+    if (!it_opt) return {};
+    auto& bt = *it_opt;
+    if (bt.is_done() || bt.key_string() != term) return {};
+
+    // Parse the full posting value sequentially.
+    // Header layout matches PostingsIterator constructor, re-parsed here for
+    // direct byte-stream access.
+    FileStream file = bt.value_stream();
+    int64_t    vlen = bt.value_length();
+
+    if (vlen <= 0) return {};
+
+    FileStream hdr = file.sub_stream(0, std::min(vlen, (int64_t)200));
+
+    int32_t options      = static_cast<int32_t>(hdr.read_vbyte_u32());
+    bool    has_inlining = (options & 0x04) != 0;
+    bool    has_skips    = (options & 0x01) != 0;
+    bool    has_maxtf    = (options & 0x02) != 0;
+
+    if (has_inlining) hdr.read_vbyte_u32();   // inlineMinimum (discard)
+
+    int64_t doc_count  = static_cast<int64_t>(hdr.read_vbyte_u64());
+    /* coll_count */    hdr.read_vbyte_u64();  // discard
+
+    if (has_maxtf) hdr.read_vbyte_u64();      // max_tf (discard)
+    if (has_skips) {
+        hdr.read_vbyte_u64();  // skipDistance
+        hdr.read_vbyte_u64();  // skipResetDistance
+        hdr.read_vbyte_u64();  // numSkips
+    }
+
+    int64_t doc_byte_len   = static_cast<int64_t>(hdr.read_vbyte_u64());
+    int64_t count_byte_len = static_cast<int64_t>(hdr.read_vbyte_u64());
+    int64_t pos_byte_len   = static_cast<int64_t>(hdr.read_vbyte_u64());
+
+    if (pos_byte_len == 0) return {};   // count-only posting list
+
+    int64_t header_end = hdr.position();  // bytes consumed by header
+
+    if (has_skips) {
+        // Skip the skip-lengths fields (not needed here).
+        hdr.read_vbyte_u64();  // skipsByteLength
+        hdr.read_vbyte_u64();  // skipPositionsByteLength
+        header_end = hdr.position();
+    }
+
+    int64_t doc_off   = header_end;
+    int64_t count_off = doc_off   + doc_byte_len;
+    int64_t pos_off   = count_off + count_byte_len;
+
+    FileStream doc_s   = file.sub_stream(doc_off,   doc_byte_len);
+    FileStream count_s = file.sub_stream(count_off, count_byte_len);
+    FileStream pos_s   = file.sub_stream(pos_off,   pos_byte_len);
+
+    std::vector<PositionPosting> result;
+    result.reserve(static_cast<size_t>(doc_count));
+
+    int64_t cur_doc = 0;
+    for (int64_t i = 0; i < doc_count; ++i) {
+        cur_doc += static_cast<int64_t>(doc_s.read_vbyte_u64());
+        int32_t tf = static_cast<int32_t>(count_s.read_vbyte_u32());
+
+        std::vector<int32_t> positions;
+        positions.reserve(static_cast<size_t>(tf));
+        int32_t prev_pos = 0;
+        for (int32_t j = 0; j < tf; ++j) {
+            int32_t delta = static_cast<int32_t>(pos_s.read_vbyte_u32());
+            prev_pos += delta;
+            positions.push_back(prev_pos);
+        }
+        result.push_back({cur_doc, std::move(positions)});
+    }
+    return result;
+}
+
+// ── PostingsReader::read_positions_for ────────────────────────────────────────
+
+std::vector<PositionPosting>
+PostingsReader::read_positions_for(const std::string&          term,
+                                   const std::vector<int64_t>& doc_ids) const {
+    if (doc_ids.empty()) return {};
+
+    auto it_opt = reader_.get_iterator(term);
+    if (!it_opt) return {};
+    auto& bt = *it_opt;
+    if (bt.is_done() || bt.key_string() != term) return {};
+
+    FileStream file = bt.value_stream();
+    int64_t    vlen = bt.value_length();
+    if (vlen <= 0) return {};
+
+    FileStream hdr = file.sub_stream(0, std::min(vlen, (int64_t)200));
+
+    int32_t options      = static_cast<int32_t>(hdr.read_vbyte_u32());
+    bool    has_inlining = (options & 0x04) != 0;
+    bool    has_skips    = (options & 0x01) != 0;
+    bool    has_maxtf    = (options & 0x02) != 0;
+
+    if (has_inlining) hdr.read_vbyte_u32();
+
+    int64_t doc_count = static_cast<int64_t>(hdr.read_vbyte_u64());
+    hdr.read_vbyte_u64();  // coll_count
+
+    if (has_maxtf) hdr.read_vbyte_u64();
+    if (has_skips) {
+        hdr.read_vbyte_u64();
+        hdr.read_vbyte_u64();
+        hdr.read_vbyte_u64();
+    }
+
+    int64_t doc_byte_len   = static_cast<int64_t>(hdr.read_vbyte_u64());
+    int64_t count_byte_len = static_cast<int64_t>(hdr.read_vbyte_u64());
+    int64_t pos_byte_len   = static_cast<int64_t>(hdr.read_vbyte_u64());
+
+    if (pos_byte_len == 0) return {};
+
+    int64_t header_end = hdr.position();
+    if (has_skips) {
+        hdr.read_vbyte_u64();
+        hdr.read_vbyte_u64();
+        header_end = hdr.position();
+    }
+
+    FileStream doc_s   = file.sub_stream(header_end,                           doc_byte_len);
+    FileStream count_s = file.sub_stream(header_end + doc_byte_len,            count_byte_len);
+    FileStream pos_s   = file.sub_stream(header_end + doc_byte_len + count_byte_len, pos_byte_len);
+
+    std::vector<PositionPosting> result;
+    size_t target_idx = 0;
+
+    int64_t cur_doc = 0;
+    for (int64_t i = 0; i < doc_count && target_idx < doc_ids.size(); ++i) {
+        cur_doc += static_cast<int64_t>(doc_s.read_vbyte_u64());
+        int32_t tf = static_cast<int32_t>(count_s.read_vbyte_u32());
+
+        // Skip targets before cur_doc
+        while (target_idx < doc_ids.size() && doc_ids[target_idx] < cur_doc)
+            ++target_idx;
+
+        if (target_idx < doc_ids.size() && doc_ids[target_idx] == cur_doc) {
+            std::vector<int32_t> positions;
+            positions.reserve(static_cast<size_t>(tf));
+            int32_t prev_pos = 0;
+            for (int32_t j = 0; j < tf; ++j) {
+                int32_t delta = static_cast<int32_t>(pos_s.read_vbyte_u32());
+                prev_pos += delta;
+                positions.push_back(prev_pos);
+            }
+            result.push_back({cur_doc, std::move(positions)});
+            ++target_idx;
+        } else {
+            // Not a target: skip positions for this document
+            for (int32_t j = 0; j < tf; ++j)
+                pos_s.read_vbyte_u32();
+        }
+    }
+    return result;
+}
+
 } // namespace galago

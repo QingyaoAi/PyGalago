@@ -99,6 +99,13 @@ private:
     void reposition_main_streams();
 };
 
+// ── PositionPosting ───────────────────────────────────────────────────────────
+// A (docid, positions) pair for SDM / proximity scoring.
+struct PositionPosting {
+    int64_t               doc_id;
+    std::vector<int32_t>  positions;   // sorted ascending
+};
+
 // ── PostingsReader ────────────────────────────────────────────────────────────
 // Opens a postings B-tree file and provides per-term iterators.
 
@@ -111,6 +118,16 @@ public:
 
     // Stats for a term (df, cf) without full iteration.
     std::optional<PostingStats> get_stats(const std::string& term) const;
+
+    // Read full positional posting list for term (sequential, no skipping).
+    // Returns empty vector if the term is not in the index or has no positions.
+    std::vector<PositionPosting> read_positions(const std::string& term) const;
+
+    // Read positions only for documents in `doc_ids` (sorted ascending).
+    // Much faster than read_positions() for sparse candidate sets.
+    std::vector<PositionPosting> read_positions_for(
+        const std::string&            term,
+        const std::vector<int64_t>&   doc_ids) const;
 
     const std::string& manifest_json() const { return reader_.manifest_json(); }
 

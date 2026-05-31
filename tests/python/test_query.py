@@ -256,7 +256,7 @@ class TestRetrieval:
         assert len(results) > 0
 
     def test_missing_term_graceful(self, retrieval):
-        results = retrieval.search("xyzzy_no_such_term_zyx", n=10)
+        results = retrieval.search("xyzzynosuchterm", n=10)
         assert results == []
 
     def test_search_scored_returns_scored_documents(self, retrieval):

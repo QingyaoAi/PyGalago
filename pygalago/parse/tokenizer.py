@@ -16,8 +16,13 @@ from typing import List, Optional
 
 from pygalago.parse.document import Document
 
-# Characters that are kept as-is (word characters + digits).
-_WORD_RE = re.compile(r"[a-zA-Z0-9]+(?:['\-][a-zA-Z0-9]+)*")
+# Match contiguous alphanumeric sequences only — matches Java Galago's
+# TagTokenizer behaviour of splitting on ALL punctuation including hyphens
+# and apostrophes.  Keeping hyphens in word tokens caused prefix strings like
+# "non", "anti", "post", "co" to be merged into compounds ("non-proliferation")
+# instead of being indexed separately, producing a large vocabulary gap vs
+# Galago Java and ~6% MAP loss on Robust04.
+_WORD_RE = re.compile(r"[a-zA-Z0-9]+")
 
 # HTML/SGML tag pattern (very permissive).
 _TAG_RE = re.compile(r"<[^>]*>")

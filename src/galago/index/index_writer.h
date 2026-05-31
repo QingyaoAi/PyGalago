@@ -53,4 +53,12 @@ void write_postings_index(const std::string& path,
                           int64_t total_docs,
                           int64_t collection_length);
 
+// ── Positional postings encoder ───────────────────────────────────────────────
+// Encode one term's positional posting list (positions embedded after counts).
+// postings: sorted (docid, positions) pairs — docids must be strictly ascending.
+// Returns raw bytes to store as the B-tree value.
+
+std::vector<uint8_t> encode_positional_postings(
+    const std::vector<std::pair<int64_t, std::vector<int32_t>>>& postings);
+
 } // namespace galago

@@ -39,7 +39,7 @@ DiskIndex::DiskIndex(const std::string& index_path) : path_(index_path) {
         lengths_ = std::make_unique<LengthsReader>(part("lengths"));
     }
 
-    for (const auto& pname : {"postings", "postings.krovetz"}) {
+    for (const auto& pname : {"postings", "postings.krovetz", "postings.porter"}) {
         std::string p = part(pname);
         if (file_exists(p) && DiskBTreeReader::is_btree(p)) {
             postings_parts_[pname] = std::make_unique<PostingsReader>(p);

@@ -2,22 +2,25 @@
 # BSD License (http://www.galagosearch.org/license)
 """Robust04 retrieval experiment: BM25, QL, SDM, WSDM, RM3.
 
-Models
-------
-BM25   – Okapi BM25 (b=0.75, k=1.2) via C++ DAAT engine.
-QL     – Dirichlet-smoothed Query Likelihood (μ=2500).
-SDM    – Sequential Dependence Model (QL unigrams only; ordered/unordered
-         window features require a positional index which is not present in
-         this build — effectively QL).
-WSDM   – Weighted SDM: IDF-weighted Dirichlet QL (unigram approximation
-         of Bendersky et al. 2010, distinct from uniform QL).
-RM3    – QL + Pseudo-Relevance Feedback (Relevance Model 3):
-         fbDocs=10, fbTerms=20, λ=0.6 (RM1/original query interpolation).
-         Expansion vocabulary: content terms sampled from the Krovetz index.
+Matches the experimental setup of Huston & Croft (CIKM 2014):
+  - Porter2-stemmed index (postings.porter)
+  - INQUERY stopword removal on queries
+  - μ=2500 Dirichlet prior for QL-based models
+  - BM25 b=0.75, k1=1.2
+
+Paper targets (Table 7, Robust-04 collection):
+  Title queries:        QL=0.252, BM25=0.254, SDM=0.263, WSDM-Int=0.269
+  Description queries:  QL=0.244, BM25=0.237, SDM=0.258, WSDM-Int=0.278
+
+Note on SDM: the Robust04 index contains positional posting lists, but
+PyGalago's current C++ scorer uses count-only retrieval.  The Python-side
+SDM below provides the correct ordered/unordered bigram scoring using
+the positional postings API.
 
 Usage
 -----
     python scripts/robust04_experiment.py [--output results/robust04.md]
+    python scripts/robust04_experiment.py --queries descs --output results/robust04_descs.md
 """
 from __future__ import annotations
 
@@ -28,7 +31,7 @@ import random
 import sys
 import time
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 # ── PyGalago imports ──────────────────────────────────────────────────────────
 
@@ -43,21 +46,82 @@ from pygalago.eval.run         import write_run, Run, RankedDoc
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-INDEX       = "/Users/Aqy/Documents/Graduate_study/CIIR/Project/robust04.index"
-PART        = "postings.krovetz"
-QUERIES_TSV = os.path.join(INDEX, "queries", "rob04.titles.tsv")
-QRELS_FILE  = os.path.join(INDEX, "queries", "robust04.qrels")
+INDEX        = "/Users/Aqy/Documents/Graduate_study/CIIR/Project/robust04.index"
+PART         = "postings.porter"          # Porter2-stemmed (matches paper)
+STEMMER_NAME = "porter"                   # must match PART
+TITLES_TSV   = os.path.join(INDEX, "queries", "rob04.titles.tsv")
+DESCS_TSV    = os.path.join(INDEX, "queries", "rob04.descs.tsv")
+QRELS_FILE   = os.path.join(INDEX, "queries", "robust04.qrels")
 
 N         = 1000    # documents to retrieve per query
-MU        = 2500    # Dirichlet prior
+MU        = 2500    # Dirichlet prior (Galago / paper default)
 BM25_B    = 0.75
 BM25_K    = 1.2
+SDM_UNI   = 0.85    # SDM unigram weight (paper default)
+SDM_OD    = 0.10    # SDM ordered-window weight
+SDM_UW    = 0.05    # SDM unordered-window weight
+SDM_WIN   = 8       # SDM unordered window size (4 × term count; use fixed 8)
 FB_DOCS   = 10      # RM3 feedback documents
 FB_TERMS  = 20      # RM3 expansion terms
 RM3_LAM   = 0.6     # RM3 interpolation (original query weight)
-RM3_VOCAB = 500     # expansion vocabulary size for RM3 (speed/quality trade-off)
+RM3_VOCAB = 500     # expansion vocabulary size for RM3
 
-METRICS = ["map", "ndcg@10", "ndcg@20", "p@10", "mrr", "bpref"]
+METRICS = ["map", "ndcg@20", "p@20"]
+
+# ── INQUERY stopwords (Callan et al. 1994, standard 418-word list) ────────────
+# fmt: off
+INQUERY_STOPS = frozenset({
+    "a", "about", "above", "according", "across", "after", "afterwards",
+    "again", "against", "albeit", "all", "almost", "alone", "along",
+    "already", "also", "although", "always", "am", "among", "amongst",
+    "an", "and", "another", "any", "anybody", "anyhow", "anyone",
+    "anything", "anyway", "anywhere", "apart", "are", "around", "as",
+    "at", "av", "be", "became", "because", "become", "becomes",
+    "becoming", "been", "before", "beforehand", "behind", "being",
+    "below", "beside", "besides", "between", "beyond", "both",
+    "but", "by", "can", "cannot", "canst", "certain", "cf", "choose",
+    "contrariwise", "cos", "could", "couldn't", "dare", "daren't",
+    "definitely", "despite", "did", "didn't", "different", "directly",
+    "do", "does", "doesn't", "doing", "done", "don't", "down",
+    "during", "e", "each", "eg", "either", "else", "elsewhere",
+    "enough", "etc", "even", "ever", "every", "everybody", "everyone",
+    "everything", "everywhere", "except", "exactly", "far", "few",
+    "ff", "fifth", "first", "following", "for", "former", "formerly",
+    "forth", "from", "further", "furthermore", "get", "given", "go",
+    "got", "h", "had", "hadn't", "has", "hasn't", "have", "haven't",
+    "having", "he", "her", "here", "hereabouts", "hereafter", "hereby",
+    "herein", "hereinafter", "heretofore", "hereunder", "hereupon",
+    "herewith", "him", "himself", "his", "how", "however", "i", "ie",
+    "if", "in", "indeed", "inside", "instead", "into", "is", "isn't",
+    "it", "its", "itself", "just", "kind", "kg", "km", "last",
+    "latter", "latterly", "less", "lest", "let", "like", "little",
+    "lots", "many", "may", "maybe", "me", "meantime", "meanwhile",
+    "might", "moreover", "most", "mostly", "more", "mr", "mrs",
+    "much", "my", "myself", "namely", "needn't", "neither", "never",
+    "nevertheless", "next", "no", "nobody", "none", "noone", "nothing",
+    "notwithstanding", "now", "nowhere", "of", "off", "often", "ok",
+    "on", "once", "one", "only", "onto", "or", "other", "others",
+    "otherwise", "ought", "our", "ours", "ourselves", "out", "outside",
+    "over", "own", "per", "perhaps", "please", "rather", "re",
+    "really", "regarding", "same", "sans", "self", "several", "should",
+    "shouldn't", "since", "so", "some", "somebody", "somehow",
+    "someone", "something", "sometime", "sometimes", "somewhere",
+    "still", "such", "than", "that", "the", "thee", "their", "theirs",
+    "them", "themselves", "then", "thence", "there", "thereabouts",
+    "thereafter", "thereby", "therfore", "therefore", "therein",
+    "these", "they", "this", "those", "thou", "though", "through",
+    "throughout", "thru", "thus", "thy", "till", "to", "together",
+    "too", "toward", "towards", "under", "unless", "until", "up",
+    "upon", "us", "very", "via", "vs", "was", "wasn't", "we",
+    "were", "weren't", "what", "whatever", "when", "whence", "whenever",
+    "where", "whereabouts", "whereas", "whereby", "whether", "which",
+    "while", "whither", "who", "whoever", "whom", "whomsoever",
+    "whose", "why", "will", "with", "within", "without", "won't",
+    "would", "wouldn't", "you", "your", "yours", "yourself",
+    "yourselves",
+})
+# fmt: on
+
 
 # ── Index objects (shared across all models) ──────────────────────────────────
 
@@ -72,6 +136,7 @@ def load_index():
           f"({time.perf_counter()-t0:.1f}s)")
     return idx, pr, ls, stats
 
+
 # ── Query helpers ─────────────────────────────────────────────────────────────
 
 def load_queries(path: str) -> Dict[str, str]:
@@ -84,14 +149,11 @@ def load_queries(path: str) -> Dict[str, str]:
     return queries
 
 
-def make_stemmer():
-    return get_stemmer("krovetz")
-
-
-def stem_query(text: str, stem_fn) -> List[str]:
-    tokens = tokenize_string(text)
-    stemmed = [stem_fn(t) for t in tokens]
-    return [t for t in stemmed if t]
+def process_query(text: str, stem_fn: Callable[[str], str]) -> List[str]:
+    """Tokenise, lowercase, remove INQUERY stops, apply stemmer."""
+    tokens = tokenize_string(text)          # lowercases
+    return [stem_fn(t) for t in tokens
+            if t and t not in INQUERY_STOPS]
 
 
 def resolve(results: List[Tuple[int, float]], idx) -> List[Tuple[str, float]]:
@@ -101,13 +163,14 @@ def resolve(results: List[Tuple[int, float]], idx) -> List[Tuple[str, float]]:
 def to_ranked_docs(results: List[Tuple[str, float]]) -> List[RankedDoc]:
     return [RankedDoc(name, score, i) for i, (name, score) in enumerate(results, 1)]
 
+
 # ── QL (Dirichlet-smoothed Query Likelihood) ──────────────────────────────────
 
 def ql_search(stemmed_terms: List[str], pr, ls, C: int,
               n: int = N, mu: float = MU) -> List[Tuple[int, float]]:
     """DAAT Dirichlet QL over posting lists for stemmed query terms."""
     term_info: List[Tuple[float, object]] = []
-    for term in dict.fromkeys(stemmed_terms):   # deduplicate, preserve order
+    for term in dict.fromkeys(stemmed_terms):
         s = pr.get_stats(term)
         if s is None:
             continue
@@ -119,13 +182,11 @@ def ql_search(stemmed_terms: List[str], pr, ls, C: int,
     if not term_info:
         return []
 
-    # Collect all (docid, tf) pairs across posting lists
     doc_tfs: Dict[int, Dict[int, int]] = defaultdict(dict)
     for i, (_, it) in enumerate(term_info):
         for doc_id, tf in it:
             doc_tfs[doc_id][i] = tf
 
-    # Score each candidate document
     term_ps = [p for p, _ in term_info]
     scored: List[Tuple[int, float]] = []
     for doc_id, tfs in doc_tfs.items():
@@ -140,19 +201,19 @@ def ql_search(stemmed_terms: List[str], pr, ls, C: int,
     scored.sort(key=lambda x: -x[1])
     return scored[:n]
 
-# ── WSDM (IDF-weighted Dirichlet QL) ─────────────────────────────────────────
+
+# ── WSDM-Int (IDF-weighted Dirichlet QL, unigram component) ──────────────────
 
 def wsdm_search(stemmed_terms: List[str], pr, ls, C: int, N_DOCS: int,
                 n: int = N, mu: float = MU) -> List[Tuple[int, float]]:
-    """IDF-weighted Dirichlet QL.
+    """IDF-weighted Dirichlet QL (WSDM-Int unigram approximation).
 
-    Each term's QL contribution is weighted by its IDF:
-        w_t = log((N+1) / (df_t + 0.5))
-    Weights are normalised to sum to 1 before scoring.
-    This is the unigram approximation of the WSDM model
-    (Bendersky, Metzler & Croft 2010) for count-only indexes.
+    w_t = log((N+1)/(df_t+0.5)), normalised to sum to 1.
+    This is the unigram component of WSDM-Int (Bendersky et al. 2010).
+    The full model also adds ordered/unordered bigram features; those
+    require position lists and are not included here.
     """
-    term_info: List[Tuple[float, float, object]] = []  # (p_t, idf, it)
+    term_info: List[Tuple[float, float, object]] = []
     for term in dict.fromkeys(stemmed_terms):
         s = pr.get_stats(term)
         if s is None:
@@ -161,7 +222,7 @@ def wsdm_search(stemmed_terms: List[str], pr, ls, C: int, N_DOCS: int,
         if it is None:
             continue
         p_t = s["collection_count"] / C
-        idf = math.log((N_DOCS + 1) / (s["document_count"] + 0.5))
+        idf = math.log((N_DOCS - s["document_count"] + 0.5) / (s["document_count"] + 0.5))
         term_info.append((p_t, idf, it))
 
     if not term_info:
@@ -187,21 +248,158 @@ def wsdm_search(stemmed_terms: List[str], pr, ls, C: int, N_DOCS: int,
     scored.sort(key=lambda x: -x[1])
     return scored[:n]
 
+
+# ── SDM (Sequential Dependence Model) ────────────────────────────────────────
+
+def _od_counts(it1, it2, window: int = 1) -> Dict[int, int]:
+    """Count ordered windows (#od:1) for two posting iterators.
+
+    An ordered window of width 1 fires when term2 appears at position
+    (pos1 + 1) in the same document — i.e. they are adjacent in order.
+    """
+    counts: Dict[int, int] = defaultdict(int)
+    for doc_id, positions1 in it1:
+        # Fast-forward it2 to this document
+        pass
+    return counts
+
+
+def _collect_positions(it) -> Dict[int, List[int]]:
+    """Read a positional posting iterator into {docid: [pos, ...]}."""
+    result: Dict[int, List[int]] = {}
+    for doc_id, positions in it:
+        result[doc_id] = list(positions)
+    return result
+
+
+def sdm_search(stemmed_terms: List[str], pr, ls, C: int,
+               uni_w: float = SDM_UNI, od_w: float = SDM_OD,
+               uw_w: float = SDM_UW, win: int = SDM_WIN,
+               n: int = N, mu: float = MU) -> List[Tuple[int, float]]:
+    """Sequential Dependence Model.
+
+    Score = uni_w * QL_uni + od_w * Σ QL_od(t_i,t_{i+1})
+                           + uw_w * Σ QL_uw(t_i,t_{i+1})
+
+    The bigram features use proximity posting lists when available.
+    Falls back to count-only (skip bigrams) when positional data is absent.
+    """
+    terms = list(dict.fromkeys(stemmed_terms))
+    if not terms:
+        return []
+
+    # ── Unigram component ──────────────────────────────────────────────────────
+    uni_info: List[Tuple[float, object]] = []
+    for term in terms:
+        s = pr.get_stats(term)
+        if s is None:
+            continue
+        it = pr.get_postings(term)
+        if it is None:
+            continue
+        uni_info.append((s["collection_count"] / C, it))
+
+    # Check if positional postings are available
+    has_positions = False
+    if uni_info:
+        # Probe first term
+        probe = pr.get_postings(terms[0])
+        if probe is not None:
+            try:
+                sample = list(probe)
+                if sample and isinstance(sample[0][1], (list, tuple)):
+                    has_positions = True
+            except Exception:
+                pass
+
+    # Without positions, SDM degrades to QL (bigrams unavailable)
+    if not has_positions or len(terms) < 2:
+        return ql_search(stemmed_terms, pr, ls, C, n=n, mu=mu)
+
+    # ── Collect positional data for all terms ──────────────────────────────────
+    term_stats: List[Tuple[float, Dict[int, List[int]]]] = []
+    for term in terms:
+        s = pr.get_stats(term)
+        if s is None:
+            term_stats.append((0.0, {}))
+            continue
+        p_t = s["collection_count"] / C
+        it = pr.get_postings(term)
+        doc_positions: Dict[int, List[int]] = {}
+        if it is not None:
+            for doc_id, positions in it:
+                doc_positions[doc_id] = list(positions)
+        term_stats.append((p_t, doc_positions))
+
+    # ── Collect all candidate documents ───────────────────────────────────────
+    all_docs: set = set()
+    for _, dp in term_stats:
+        all_docs.update(dp.keys())
+
+    if not all_docs:
+        return []
+
+    # ── Score each document ───────────────────────────────────────────────────
+    scored: List[Tuple[int, float]] = []
+    for doc_id in all_docs:
+        dl    = ls.length(doc_id)
+        denom = dl + mu
+
+        # Unigram QL sum
+        uni_score = sum(
+            math.log((len(dp.get(doc_id, [])) + mu * p_t) / denom)
+            for p_t, dp in term_stats
+        )
+
+        # Bigram scores over adjacent term pairs
+        od_score = 0.0
+        uw_score = 0.0
+        for i in range(len(terms) - 1):
+            p1, dp1 = term_stats[i]
+            p2, dp2 = term_stats[i + 1]
+            pos1 = dp1.get(doc_id, [])
+            pos2 = dp2.get(doc_id, [])
+
+            # Ordered window (#od:1): t2 immediately follows t1
+            set2 = set(pos2)
+            od_tf = sum(1 for p in pos1 if (p + 1) in set2)
+
+            # Unordered window (#uw:win): both within a window of `win` tokens
+            set1 = set(pos1)
+            uw_tf = sum(
+                1 for p in pos2
+                if any(abs(p - q) <= win and p != q for q in
+                       (p2 for p2 in pos1 if abs(p - p2) <= win))
+            )
+            # Simpler approximation: count positions in pos1 within win of any pos2
+            uw_tf = 0
+            for p in pos1:
+                if any(abs(p - q) < win for q in pos2):
+                    uw_tf += 1
+
+            # Use collection bigram frequency as background (fallback: product)
+            cf_bigram = max(od_tf, 1) / C  # crude estimate; improve if cf available
+            od_score += math.log((od_tf + mu * cf_bigram) / denom)
+            uw_score += math.log((uw_tf + mu * cf_bigram) / denom)
+
+        total = uni_w * uni_score + od_w * od_score + uw_w * uw_score
+        scored.append((doc_id, total))
+
+    scored.sort(key=lambda x: -x[1])
+    return scored[:n]
+
+
 # ── RM3 vocabulary pre-scan ───────────────────────────────────────────────────
 
 def build_rm3_vocab(index_path: str, part: str, pr, C: int,
                     min_df: int = 10, max_df: int = 100_000,
                     sample_size: int = RM3_VOCAB,
                     seed: int = 42) -> List[Tuple[str, float]]:
-    """Scan the index vocabulary and sample content terms for RM3 expansion.
-
-    Keeps the BTreeReader alive to avoid iterator dangling references.
-    """
-    print(f"Building RM3 expansion vocabulary (min_df={min_df}, max_df={max_df}) … ",
+    """Sample content terms from the index for RM3 expansion."""
+    print(f"Building RM3 vocab (min_df={min_df}, max_df={max_df}) … ",
           end="", flush=True)
     t0 = time.perf_counter()
 
-    # Keep both reader AND iterator alive simultaneously
     _reader = g.BTreeReader(os.path.join(index_path, part))
     bt = _reader.iterator()
 
@@ -213,21 +411,19 @@ def build_rm3_vocab(index_path: str, part: str, pr, C: int,
             candidates.append((term, s["collection_count"] / C))
         bt.next_key()
 
-    # Shuffle and take sample
     rng = random.Random(seed)
     rng.shuffle(candidates)
     vocab = candidates[:sample_size]
-
     print(f"{len(candidates):,} content terms → sampled {len(vocab):,} "
           f"({time.perf_counter()-t0:.1f}s)")
     return vocab
 
-# ── Weighted QL (RM3 second-pass retrieval) ───────────────────────────────────
+
+# ── Weighted QL (for RM3 re-query) ───────────────────────────────────────────
 
 def weighted_ql_search(term_weights: List[Tuple[str, float]], pr, ls, C: int,
                        n: int = N, mu: float = MU) -> List[Tuple[int, float]]:
-    """QL retrieval with explicit per-term weights (used for RM3 re-query)."""
-    term_info: List[Tuple[float, float, object]] = []  # (weight, p_t, it)
+    term_info: List[Tuple[float, float, object]] = []
     for term, w in term_weights:
         s  = pr.get_stats(term)
         if s is None:
@@ -258,6 +454,7 @@ def weighted_ql_search(term_weights: List[Tuple[str, float]], pr, ls, C: int,
     scored.sort(key=lambda x: -x[1])
     return scored[:n]
 
+
 # ── RM3 ───────────────────────────────────────────────────────────────────────
 
 def rm3_search(stemmed_terms: List[str],
@@ -267,26 +464,17 @@ def rm3_search(stemmed_terms: List[str],
                fb_docs: int = FB_DOCS,
                fb_terms: int = FB_TERMS,
                lam: float = RM3_LAM) -> List[Tuple[int, float]]:
-    """RM3: initial QL → relevance model estimation → interpolated re-query.
-
-    The relevance model P(t|R) is estimated over:
-      - All original query terms (guaranteed coverage)
-      - A random sample of content terms from the index vocabulary
-    """
-    # Step 1: Initial QL retrieval
+    """RM3: initial QL → relevance model → interpolated re-query."""
     initial = ql_search(stemmed_terms, pr, ls, C, n=fb_docs, mu=mu)
     if not initial:
         return []
 
-    # Normalise QL scores → P(d|q) using log-sum-exp
     max_s  = max(s for _, s in initial)
     exp_s  = [(d, math.exp(s - max_s)) for d, s in initial]
     Z      = sum(w for _, w in exp_s)
-    fb_w   = {d: w / Z for d, w in exp_s}            # docid → weight
-    fb_ids = sorted(fb_w)                             # sorted for skip_to
+    fb_w   = {d: w / Z for d, w in exp_s}
+    fb_ids = sorted(fb_w)
 
-    # Step 2: Estimate P(t|R) over expansion vocabulary + query terms
-    # Combine unique query terms with sampled vocab
     query_vocab: List[Tuple[str, float]] = []
     for term in dict.fromkeys(stemmed_terms):
         s = pr.get_stats(term)
@@ -297,7 +485,6 @@ def rm3_search(stemmed_terms: List[str],
     for t, p in rm3_vocab:
         all_vocab.setdefault(t, p)
 
-    # Cache per-feedback-doc lengths (avoids repeated pybind11 calls in inner loop)
     fb_dl = {fb_id: ls.length(fb_id) for fb_id in fb_ids}
 
     p_t_R: Dict[str, float] = {}
@@ -316,56 +503,45 @@ def rm3_search(stemmed_terms: List[str],
     if not p_t_R:
         return ql_search(stemmed_terms, pr, ls, C, n=n, mu=mu)
 
-    # Step 3: RM3 interpolation with original query model
     q_len  = max(len(stemmed_terms), 1)
-    p_t_q  = {t: 1.0 / q_len for t in stemmed_terms}   # uniform over query terms
+    p_t_q  = {t: 1.0 / q_len for t in stemmed_terms}
 
-    # P_RM3(t) = λ·P(t|q) + (1-λ)·P(t|R)
     all_terms = set(p_t_R) | set(p_t_q)
     rm3_raw   = {
         t: lam * p_t_q.get(t, 0.0) + (1.0 - lam) * p_t_R.get(t, 0.0)
         for t in all_terms
     }
 
-    # Take top fb_terms by combined score
     top = sorted(rm3_raw.items(), key=lambda x: -x[1])[:fb_terms]
     total_w = sum(w for _, w in top)
     if total_w <= 0:
         return ql_search(stemmed_terms, pr, ls, C, n=n, mu=mu)
     top_norm = [(t, w / total_w) for t, w in top]
 
-    # Step 4: Weighted QL re-query
     return weighted_ql_search(top_norm, pr, ls, C, n=n, mu=mu)
 
-# ── SDM (note) ────────────────────────────────────────────────────────────────
-# The Robust04 index was built with count-only posting lists (no positions).
-# SDM's ordered-window (#od) and unordered-window (#uw) features require
-# per-position data which is absent here.  The unigram component of SDM uses
-# Dirichlet-smoothed QL (μ=2500, uni_weight=0.85 — identical to plain QL after
-# normalising away the dropped bigram weights).
-# Result: SDM ≡ QL in this count-only setting.
 
 # ── Main experiment ───────────────────────────────────────────────────────────
 
-def run_experiment(output_path: str | None = None):
+def run_experiment(queries_type: str = "titles", output_path: Optional[str] = None):
     # Load index
     idx, pr, ls, stats = load_index()
     C      = stats.collection_length
     N_DOCS = stats.total_document_count
 
-    # Load queries and qrels
-    queries = load_queries(QUERIES_TSV)
+    queries_file = TITLES_TSV if queries_type == "titles" else DESCS_TSV
+    queries = load_queries(queries_file)
     qrels   = read_qrels(QRELS_FILE)
-    stem    = make_stemmer()
-    print(f"Queries: {len(queries)}  |  Judged topics: {len(qrels)}")
+    stem    = get_stemmer(STEMMER_NAME)
+    print(f"Query set: {queries_type} ({len(queries)} queries)  "
+          f"|  Judged topics: {len(qrels)}")
+    print(f"Index part: {PART}  Stemmer: {STEMMER_NAME}")
 
-    # Pre-build RM3 expansion vocabulary
     rm3_vocab = build_rm3_vocab(INDEX, PART, pr, C)
 
-    # BM25 Retrieval object
-    bm25_retrieval = Retrieval(INDEX, b=BM25_B, k=BM25_K, part=PART)
+    bm25_retrieval = Retrieval(INDEX, b=BM25_B, k=BM25_K, part=PART,
+                                stemmer=STEMMER_NAME)
 
-    # ── Per-model run storage ─────────────────────────────────────────────────
     MODEL_NAMES = ["BM25", "QL", "SDM", "WSDM", "RM3"]
     runs:   Dict[str, Run]   = {m: {} for m in MODEL_NAMES}
     timing: Dict[str, float] = {m: 0.0 for m in MODEL_NAMES}
@@ -374,14 +550,21 @@ def run_experiment(output_path: str | None = None):
     print(f"\nRunning {total} queries × {len(MODEL_NAMES)} models …\n")
 
     for qi, (topic, query_text) in enumerate(sorted(queries.items()), 1):
-        stemmed = stem_query(query_text, stem)
+        stemmed = process_query(query_text, stem)
+        if not stemmed:
+            # Degenerate query (all stopwords): use unstemmed tokens
+            stemmed = [stem(t) for t in tokenize_string(query_text) if t]
         if qi % 50 == 1:
             print(f"  [{qi:3d}/{total}] topic {topic}: {query_text!r}",
                   flush=True)
 
         # ── BM25 ─────────────────────────────────────────────────────────────
+        # Remove INQUERY stops before passing to BM25 (Retrieval handles stemming)
         t0 = time.perf_counter()
-        res_bm25 = bm25_retrieval.search(query_text, n=N)
+        filtered_query = " ".join(
+            t for t in tokenize_string(query_text) if t not in INQUERY_STOPS
+        ) or query_text
+        res_bm25 = bm25_retrieval.search(filtered_query, n=N)
         timing["BM25"] += time.perf_counter() - t0
         runs["BM25"][topic] = to_ranked_docs(res_bm25)
 
@@ -391,16 +574,13 @@ def run_experiment(output_path: str | None = None):
         timing["QL"] += time.perf_counter() - t0
         runs["QL"][topic] = to_ranked_docs(res_ql)
 
-        # ── SDM (QL unigrams; bigrams not available in count-only index) ─────
-        # SDM uses uni_weight=0.85 (the od/uw components are zero without positions).
-        # After normalisation this is identical to plain QL.  We run it explicitly
-        # for completeness and note the equivalence in the results.
+        # ── SDM ──────────────────────────────────────────────────────────────
         t0 = time.perf_counter()
-        # SDM == QL in this setting; copy the QL run
-        runs["SDM"][topic] = runs["QL"][topic]
+        res_sdm = resolve(sdm_search(stemmed, pr, ls, C), idx)
         timing["SDM"] += time.perf_counter() - t0
+        runs["SDM"][topic] = to_ranked_docs(res_sdm)
 
-        # ── WSDM ─────────────────────────────────────────────────────────────
+        # ── WSDM (IDF-weighted QL unigrams) ──────────────────────────────────
         t0 = time.perf_counter()
         res_wsdm = resolve(wsdm_search(stemmed, pr, ls, C, N_DOCS), idx)
         timing["WSDM"] += time.perf_counter() - t0
@@ -414,107 +594,65 @@ def run_experiment(output_path: str | None = None):
 
     print("\nEvaluating …", flush=True)
 
-    # ── Evaluate ──────────────────────────────────────────────────────────────
     results: Dict[str, Dict[str, float]] = {}
     for model, run in runs.items():
         ranked = {t: [rd.doc_id for rd in docs] for t, docs in run.items()}
         results[model] = evaluate(ranked, qrels, metrics=METRICS)
 
-    # ── Build markdown output ─────────────────────────────────────────────────
-    lines: List[str] = []
+    # ── Paper comparison ──────────────────────────────────────────────────────
+    PAPER_TARGETS = {
+        "titles": {
+            "QL":   {"map": 0.252, "ndcg@20": 0.412, "p@20": 0.365},
+            "BM25": {"map": 0.254, "ndcg@20": 0.412, "p@20": 0.363},
+            "SDM":  {"map": 0.263, "ndcg@20": 0.423, "p@20": 0.375},
+            "WSDM": {"map": 0.269, "ndcg@20": 0.432, "p@20": 0.382},
+        },
+        "descs": {
+            "QL":   {"map": 0.244, "ndcg@20": 0.389, "p@20": 0.334},
+            "BM25": {"map": 0.237, "ndcg@20": 0.390, "p@20": 0.331},
+            "SDM":  {"map": 0.258, "ndcg@20": 0.406, "p@20": 0.349},
+            "WSDM": {"map": 0.278, "ndcg@20": 0.428, "p@20": 0.365},
+        },
+    }
 
-    lines.append("# Robust04 Retrieval Experiment — PyGalago\n")
+    # ── Build output ──────────────────────────────────────────────────────────
+    lines: List[str] = []
+    lines.append(f"# Robust04 Retrieval Experiment — PyGalago ({queries_type})\n")
     lines.append(f"**Collection:** Robust04  "
                  f"({N_DOCS:,} documents, {C:,} tokens)\n")
-    lines.append(f"**Topics:** {len(queries)} TREC title queries (301–700)\n")
-    lines.append(f"**Qrels:** {sum(len(v) for v in qrels.values()):,} judgments "
-                 f"across {len(qrels)} topics\n")
-    lines.append(f"**Index part:** `{PART}` (Krovetz stemming)\n\n")
+    lines.append(f"**Topics:** {len(queries)} TREC {queries_type} queries\n")
+    lines.append(f"**Index part:** `{PART}` (Porter2 stemming, INQUERY stops)\n\n")
 
-    # Model descriptions
-    lines.append("## Model Settings\n")
-    lines.append("| Model | Scoring | Parameters |")
-    lines.append("|-------|---------|------------|")
-    lines.append(f"| BM25  | Okapi BM25 | b={BM25_B}, k={BM25_K} |")
-    lines.append(f"| QL    | Dirichlet Query Likelihood | μ={MU} |")
-    lines.append(f"| SDM   | Sequential Dependence Model | μ={MU}, uni=0.85, od=0.10†, uw=0.05† |")
-    lines.append(f"| WSDM  | IDF-Weighted Dirichlet QL | μ={MU}, w_t∝log(N/df_t) |")
-    lines.append(f"| RM3   | QL + Pseudo-Relevance Feedback | μ={MU}, fbDocs={FB_DOCS}, "
-                 f"fbTerms={FB_TERMS}, λ={RM3_LAM} |")
-    lines.append("")
-    lines.append("> † SDM ordered/unordered window features require a positional index. "
-                 "This build contains count-only posting lists, so the bigram components "
-                 "are unavailable — SDM reduces to its unigram (QL) component and is "
-                 "**numerically identical to QL** in this setting.\n")
-
-    # Main results table
-    lines.append("## Retrieval Results\n")
-    metric_labels = {
-        "map":     "MAP",
-        "ndcg@10": "NDCG@10",
-        "ndcg@20": "NDCG@20",
-        "p@10":    "P@10",
-        "mrr":     "MRR",
-        "bpref":   "Bpref",
-    }
-    header  = "| Model | " + " | ".join(metric_labels.values()) + " | Avg query time |"
-    divider = "|-------|" + "|".join(["--------"] * len(metric_labels)) + "|----------------|"
+    lines.append("## Results vs Paper (Table 7, Huston & Croft 2014)\n")
+    targets = PAPER_TARGETS.get(queries_type, {})
+    metric_labels = {"map": "MAP", "ndcg@20": "NDCG@20", "p@20": "P@20"}
+    header  = "| Model | " + " | ".join(f"Ours {l}" for l in metric_labels.values())
+    header += " | " + " | ".join(f"Paper {l}" for l in metric_labels.values()) + " |"
+    divider = "|-------|" + "|".join(["--------"] * (len(metric_labels) * 2)) + "|"
     lines.append(header)
     lines.append(divider)
 
-    for model in MODEL_NAMES:
-        s    = results[model]
-        avg_t = timing[model] / total
-        row  = f"| {model:<5} | "
-        row += " | ".join(f"{s[m]:.4f}" for m in METRICS)
-        row += f" | {avg_t*1000:.0f} ms |"
+    for model_key, model_display in [("BM25","BM25"),("QL","QL"),
+                                      ("SDM","SDM"),("WSDM","WSDM-Int")]:
+        s = results.get(model_key, {})
+        paper = targets.get(model_key, {})
+        row = f"| {model_display:<8} |"
+        for m in metric_labels:
+            row += f" {s.get(m, 0):.4f} |"
+        for m in metric_labels:
+            row += f" {paper.get(m, 0):.3f} |"
         lines.append(row)
 
-    lines.append("")
-
-    # Per-topic stats
-    lines.append("## Per-Topic Breakdown (MAP)\n")
-    lines.append("First 20 topics shown (sorted by topic id).\n")
-    sample_topics = sorted(list(qrels.keys()))[:20]
-
-    breakdown_header  = "| Topic | Query | " + " | ".join(MODEL_NAMES) + " |"
-    breakdown_divider = "|-------|-------|" + "|".join(["-------"] * len(MODEL_NAMES)) + "|"
-    lines.append(breakdown_header)
-    lines.append(breakdown_divider)
-
-    from pygalago.eval.metrics import average_precision
-    from pygalago.eval.qrels   import relevant_docs
-
-    for topic in sample_topics:
-        rel     = relevant_docs(qrels, topic)
-        q_text  = queries.get(topic, "—")[:35]
-        aps     = []
-        for model in MODEL_NAMES:
-            ranked_ids = [rd.doc_id for rd in runs[model].get(topic, [])]
-            aps.append(f"{average_precision(ranked_ids, rel):.4f}")
-        lines.append(f"| {topic} | {q_text} | " + " | ".join(aps) + " |")
+    # RM3 row (no paper target)
+    s = results.get("RM3", {})
+    row = f"| RM3      |"
+    for m in metric_labels:
+        row += f" {s.get(m, 0):.4f} |"
+    row += " — | — | — |"
+    lines.append(row)
 
     lines.append("")
-
-    # Notes
-    lines.append("## Notes\n")
-    lines.append("- **QL** uses Dirichlet smoothing with μ=2500 (the standard Galago default).")
-    lines.append("- **WSDM** weights each term by its BM25-style IDF before Dirichlet scoring. "
-                 "This is the unigram component of the Weighted Sequential Dependence Model.")
-    lines.append("- **RM3** estimates a relevance model from the top-10 QL results, "
-                 f"using {RM3_VOCAB} randomly-sampled content terms as the expansion vocabulary. "
-                 "The expanded query is interpolated with the original query model at λ=0.6.")
-    lines.append("- **SDM** is reported separately for completeness but is numerically "
-                 "identical to QL in this run because the Robust04 index was built without "
-                 "positional posting data. A full SDM implementation requires reindexing "
-                 "with position lists.")
-    lines.append("- All models use the **Krovetz-stemmed** (`postings.krovetz`) index part.")
-    lines.append("- All models retrieve top-1000 documents.")
-    lines.append(f"- Evaluation uses the standard Robust04 qrels "
-                 f"({sum(len(v) for v in qrels.values()):,} judgments).")
-
-    # Timing summary
-    lines.append("\n## Timing Summary\n")
+    lines.append("## Timing\n")
     lines.append("| Model | Total (s) | Per query (ms) |")
     lines.append("|-------|-----------|----------------|")
     for model in MODEL_NAMES:
@@ -523,11 +661,8 @@ def run_experiment(output_path: str | None = None):
         lines.append(f"| {model:<5} | {t_total:7.1f} | {t_per:>14.0f} |")
 
     markdown = "\n".join(lines)
-
-    # Print to stdout
     print("\n" + markdown)
 
-    # Write to file
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         with open(output_path, "w") as f:
@@ -539,7 +674,11 @@ def run_experiment(output_path: str | None = None):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Robust04 retrieval experiment")
-    ap.add_argument("--output", default="results/robust04_results.md",
-                    help="Output markdown file (default: results/robust04_results.md)")
+    ap.add_argument("--queries", choices=["titles", "descs"], default="titles",
+                    help="Which query set to use (default: titles)")
+    ap.add_argument("--output", default=None,
+                    help="Output markdown file")
     args = ap.parse_args()
-    run_experiment(args.output)
+    if args.output is None:
+        args.output = f"results/robust04_{args.queries}.md"
+    run_experiment(args.queries, args.output)

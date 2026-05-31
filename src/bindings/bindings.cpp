@@ -12,6 +12,7 @@
 #include "galago/index/postings_reader.h"
 #include "galago/index/disk_index.h"
 #include "galago/index/index_writer.h"
+#include "galago/btree/disk_btree_writer.h"
 #include "galago/retrieval/lengths_source.h"
 #include "galago/retrieval/ranked_document_model.h"
 
@@ -197,6 +198,29 @@ PYBIND11_MODULE(_galago, m) {
             d["collection_count"] = s->collection_count;
             return d;
         }, py::arg("term"))
+        .def("read_positions",
+             [](PostingsReader& r, const std::string& term) -> py::list {
+                 py::list result;
+                 for (auto& pp : r.read_positions(term)) {
+                     py::list pos_list;
+                     for (int32_t p : pp.positions) pos_list.append(p);
+                     result.append(py::make_tuple(pp.doc_id, pos_list));
+                 }
+                 return result;
+             }, py::arg("term"),
+             "Read full positional postings: list of (docid, [positions]) tuples.")
+        .def("read_positions_for",
+             [](PostingsReader& r, const std::string& term,
+                const std::vector<int64_t>& doc_ids) -> py::list {
+                 py::list result;
+                 for (auto& pp : r.read_positions_for(term, doc_ids)) {
+                     py::list pos_list;
+                     for (int32_t p : pp.positions) pos_list.append(p);
+                     result.append(py::make_tuple(pp.doc_id, pos_list));
+                 }
+                 return result;
+             }, py::arg("term"), py::arg("doc_ids"),
+             "Read positions for specific sorted doc IDs only (fast candidate subset).")
         .def_property_readonly("manifest_json", &PostingsReader::manifest_json);
 
     // ── DiskIndex ─────────────────────────────────────────────────────────────
@@ -322,6 +346,35 @@ PYBIND11_MODULE(_galago, m) {
         py::arg("first_docid") = 0,
         py::arg("field")       = "document",
         "Write a Galago `lengths` B-tree file.");
+
+    // ── BTreeWriter — incremental B-tree file writer ──────────────────────────
+    py::class_<DiskBTreeWriter>(m, "BTreeWriter")
+        .def(py::init<const std::string&>(), py::arg("path"),
+             "Open a new B-tree file for writing.  Keys must be added in "
+             "strictly ascending lexicographic order.")
+        .def("add",
+             [](DiskBTreeWriter& w, const std::string& key, py::bytes value) {
+                 std::string s = static_cast<std::string>(value);
+                 std::vector<uint8_t> val(
+                     reinterpret_cast<const uint8_t*>(s.data()),
+                     reinterpret_cast<const uint8_t*>(s.data()) + s.size());
+                 w.add(key, val);
+             },
+             py::arg("key"), py::arg("value"),
+             "Add a (key, value) pair.  Keys must be strictly ascending.")
+        .def("close", &DiskBTreeWriter::close,
+             py::arg("manifest_json") = "{}",
+             "Flush and write the B-tree footer with the given manifest JSON.");
+
+    // ── encode_positional_postings ────────────────────────────────────────────
+    m.def("encode_positional_postings",
+        [](const std::vector<std::pair<int64_t, std::vector<int32_t>>>& postings) {
+            auto v = encode_positional_postings(postings);
+            return py::bytes(reinterpret_cast<const char*>(v.data()), v.size());
+        },
+        py::arg("postings"),
+        "Encode positional posting list → bytes.\n"
+        "postings: list of (docid, [positions]) pairs sorted by docid.");
 
     m.def("write_postings_index",
         [](const std::string& path,

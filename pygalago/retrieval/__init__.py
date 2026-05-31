@@ -34,6 +34,8 @@ from pygalago.query.traversals      import (
     AnnotateStatsTraversal,
     FullDependenceTraversal,
 )
+from pygalago.parse.stemmer         import get_stemmer
+from pygalago.parse.tokenizer       import tokenize_string
 
 try:
     from pygalago._galago import (
@@ -112,6 +114,10 @@ class Retrieval:
         BM25 parameters.
     part:
         Postings index part to use (default: ``"postings.krovetz"``).
+    stemmer:
+        Stemmer name used to stem plain-text query terms before lookup.
+        One of ``"none"`` (default), ``"porter"``, ``"krovetz"``.
+        Must match the stemmer used to build ``part``.
     fdm_weights:
         Weights for the Full Dependence Model (SDM) unigram/ordered/unordered
         components.  Keys: ``"uniw"`` (default 0.8), ``"odw"`` (0.15),
@@ -125,6 +131,7 @@ class Retrieval:
         b: float = 0.75,
         k: float = 1.2,
         part: str = "postings.krovetz",
+        stemmer: str = "none",
         fdm_weights: Optional[dict] = None,
     ) -> None:
         _require_extension()
@@ -146,6 +153,9 @@ class Retrieval:
         self._pr = pr
 
         self._ls = self._lengths.stats
+
+        # Query stemmer (applied to plain-text terms before index lookup)
+        self._stemmer_fn = get_stemmer(stemmer)
 
         # Traversals
         self._part_assigner = PartAssignerTraversal(part)
@@ -214,7 +224,19 @@ class Retrieval:
     # ── Internal pipeline ─────────────────────────────────────────────────────
 
     def _process_query(self, query: str) -> List[Tuple[str, float]]:
-        """Parse and traverse the query, returning weighted term pairs."""
+        """Parse and traverse the query, returning weighted term pairs.
+
+        For plain-text queries (no # operators), applies the configured
+        stemmer so terms match the index part.  Structured queries with
+        explicit operators are passed through unchanged — the caller is
+        responsible for pre-stemming any term literals in that case.
+        """
+        # Apply stemming to plain-text queries (no structured operators).
+        if "#" not in query:
+            tokens = tokenize_string(query)
+            stemmed = [self._stemmer_fn(t) for t in tokens if t]
+            query = " ".join(stemmed) if stemmed else query
+
         root = parse(query)
 
         # Apply traversals in order (matching Galago's default traversal list)
@@ -229,7 +251,13 @@ class Retrieval:
     def explain(self, query: str) -> dict:
         """Return a debug dict showing the query tree and weighted terms."""
         root_raw  = parse(query)
-        root_proc = parse(query)
+        # Apply same stemming as _process_query
+        processed_query = query
+        if "#" not in query:
+            tokens = tokenize_string(query)
+            stemmed = [self._stemmer_fn(t) for t in tokens if t]
+            processed_query = " ".join(stemmed) if stemmed else query
+        root_proc = parse(processed_query)
         root_proc = self._part_assigner.traverse(root_proc)
         root_proc = self._fdm.traverse(root_proc)
         root_proc = self._annotate.traverse(root_proc)

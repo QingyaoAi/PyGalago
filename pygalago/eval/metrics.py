@@ -228,14 +228,14 @@ def evaluate(
         elif nl in ("bpref", "binary_preference"):
             bprefs = [
                 bpref(run.get(t, []), rel_sets.get(t, frozenset()))
-                for t in qrels
+                for t in run
             ]
             results[name] = sum(bprefs) / len(bprefs) if bprefs else 0.0
 
         elif nl in ("r-prec", "r_prec", "rprecision"):
             rps = [
                 r_precision(run.get(t, []), rel_sets.get(t, frozenset()))
-                for t in qrels
+                for t in run
             ]
             results[name] = sum(rps) / len(rps) if rps else 0.0
 
@@ -243,7 +243,7 @@ def evaluate(
             k = int(nl[2:])
             p_scores = [
                 precision_at_k(run.get(t, []), rel_sets.get(t, frozenset()), k)
-                for t in qrels
+                for t in run
             ]
             results[name] = sum(p_scores) / len(p_scores) if p_scores else 0.0
 

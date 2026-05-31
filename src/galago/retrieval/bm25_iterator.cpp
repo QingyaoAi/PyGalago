@@ -14,11 +14,10 @@ BM25Iterator::BM25Iterator(std::unique_ptr<CountIterator> count_iter,
     , k_(p.k)
     , avg_dl_(p.avg_doc_length)
 {
-    // idf = log(N / (df + 0.5))  — matches Java BM25ScoringIterator exactly
-    idf_ = std::log(static_cast<double>(p.doc_count)
-                    / static_cast<double>(p.df + 1) /* df+0.5 rounded to df+1 is wrong */);
-    // Exact: same as Java: log(documentCount / (df + 0.5))
-    idf_ = std::log(static_cast<double>(p.doc_count)
+    // Robertson IDF: log((N - df + 0.5) / (df + 0.5))
+    // Matches Java BM25ScoringIterator.java exactly (Math.log((N-df+0.5)/(df+0.5))).
+    // Previous formula log(N/(df+0.5)) over-weighted medium-frequency terms.
+    idf_ = std::log((static_cast<double>(p.doc_count) - static_cast<double>(p.df) + 0.5)
                     / (static_cast<double>(p.df) + 0.5));
 
     // Score bounds — used by MAXSCORE (Phase 4+)
