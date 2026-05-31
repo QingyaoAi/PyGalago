@@ -133,15 +133,19 @@ scores = evaluate({"q1": ["doc1", "doc2"]}, qrels)
 | `KrovetzStemmer` | Krovetz stemming (falls back to identity if absent) |
 | `pytrec-eval-terrier` | Fast trec_eval wrapper (alternative to built-in metrics) |
 
-## Benchmarks (Apple M-series, Robust04 — 528K docs)
+## Benchmarks (Apple M-series, Robust04 — 528K docs, 249 title queries, top-1000)
 
-| Operation | Throughput / Latency |
+| Model | Per-query latency |
 |---|---|
-| Index build | ~80 K docs/s |
-| Single-term BM25 (top-1000) | ~50 ms |
-| Multi-term BM25 (top-1000) | ~150 ms |
+| BM25  | ~13 ms |
+| QL    | ~9 ms |
+| SDM   | ~35 ms |
+| WSDM  | ~9 ms |
+| RM3   | ~251 ms |
 
-Run `python scripts/benchmark.py --index /path/to/index` to reproduce.
+Index build: ~80K docs/s.
+
+Run `python scripts/robust04_experiment.py --index /path/to/index` to reproduce.
 
 ## License
 
