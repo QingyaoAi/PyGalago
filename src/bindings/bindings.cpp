@@ -300,6 +300,43 @@ PYBIND11_MODULE(_galago, m) {
         "Run DAAT BM25 retrieval. terms should already be stemmed/normalised.\n"
         "Returns list of ScoredDocument sorted by descending score.");
 
+    // ql_search — DAAT Dirichlet Query Likelihood (fully in C++).
+    m.def("ql_search",
+        [](DiskIndex& index, LengthsSource& lengths,
+           const std::vector<std::string>& terms,
+           double mu, int n, const std::string& part) {
+            QLParams p;
+            p.mu = mu;  p.n = n;  p.postings_part = part;
+            return ql_search(index, lengths, terms, p);
+        },
+        py::arg("index"),
+        py::arg("lengths"),
+        py::arg("terms"),
+        py::arg("mu")   = 2500.0,
+        py::arg("n")    = 1000,
+        py::arg("part") = "postings.krovetz",
+        "Run DAAT Dirichlet QL retrieval. terms should already be stemmed/normalised.\n"
+        "Returns list of ScoredDocument sorted by descending score.");
+
+    // ql_search_weighted — IDF-weighted Dirichlet QL (WSDM-Int unigram component).
+    m.def("ql_search_weighted",
+        [](DiskIndex& index, LengthsSource& lengths,
+           const std::vector<std::pair<std::string, double>>& weighted_terms,
+           double mu, int n, const std::string& part) {
+            QLParams p;
+            p.mu = mu;  p.n = n;  p.postings_part = part;
+            return ql_search_weighted(index, lengths, weighted_terms, p);
+        },
+        py::arg("index"),
+        py::arg("lengths"),
+        py::arg("weighted_terms"),
+        py::arg("mu")   = 2500.0,
+        py::arg("n")    = 1000,
+        py::arg("part") = "postings.krovetz",
+        "Run IDF-weighted Dirichlet QL (WSDM-Int unigram component).\n"
+        "weighted_terms: list of (term, weight) tuples; weights are normalised internally.\n"
+        "Returns list of ScoredDocument sorted by descending score.");
+
     // bm25_search_weighted — Phase 4 entry point for the query pipeline.
     // weighted_terms: list of (term, weight) tuples; weights are normalised internally.
     m.def("bm25_search_weighted",

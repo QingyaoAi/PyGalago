@@ -79,7 +79,13 @@ private:
     int64_t pos_;      // current absolute position
     int64_t file_size_;
 
-    void ensure_open() const;
+    // Read-ahead buffer — eliminates per-byte fseek overhead.
+    static constexpr size_t BUFFER_SIZE = 65536;  // 64 KB
+    std::vector<uint8_t>    buf_;
+    int64_t                 buf_start_ = -1;   // absolute file pos of buf_[0]
+    int64_t                 buf_size_  =  0;   // valid bytes in buf_
+
+    void fill_buffer();
     uint8_t fetch_byte();
 };
 

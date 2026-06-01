@@ -64,4 +64,39 @@ std::vector<ScoredDocument> bm25_search_weighted(
     const std::vector<std::pair<std::string, double>>&    weighted_terms,
     const BM25Params&                                     params = {});
 
+// ── Dirichlet QL parameters ───────────────────────────────────────────────────
+
+struct QLParams {
+    double mu   = 2500.0;
+    int    n    = 1000;
+    std::string postings_part = "postings.krovetz";
+};
+
+// ── QL search ────────────────────────────────────────────────────────────────
+// DAAT Dirichlet-smoothed Query Likelihood.
+// score(d,q) = Σ_t log((tf_t + μ·p_t) / (dl + μ))
+// where p_t = cf_t / C (collection language model).
+//
+// terms: already stemmed/normalised query tokens (duplicates deduplicated).
+// Returns results sorted by descending score.
+std::vector<ScoredDocument> ql_search(DiskIndex&                      index,
+                                       LengthsSource&                  lengths,
+                                       const std::vector<std::string>& terms,
+                                       const QLParams&                 params = {});
+
+// Overload that opens the index from path (avoids reopening if called once).
+std::vector<ScoredDocument> ql_search(const std::string&              index_path,
+                                       const std::vector<std::string>& terms,
+                                       const QLParams&                 params = {});
+
+// ── Weighted QL ───────────────────────────────────────────────────────────────
+// IDF-weighted Dirichlet QL (unigram component of WSDM-Int).
+// score(d,q) = Σ_t w_t · log((tf_t + μ·p_t) / (dl + μ))
+// weighted_terms: list of (term, weight) pairs; weights are normalised to sum 1.
+std::vector<ScoredDocument> ql_search_weighted(
+    DiskIndex&                                         index,
+    LengthsSource&                                     lengths,
+    const std::vector<std::pair<std::string, double>>& weighted_terms,
+    const QLParams&                                    params = {});
+
 } // namespace galago

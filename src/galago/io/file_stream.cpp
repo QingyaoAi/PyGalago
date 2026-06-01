@@ -44,23 +44,29 @@ void FileStream::seek(int64_t offset) {
         throw std::out_of_range("FileStream::seek out of range");
     }
     pos_ = abs;
+    // Don't invalidate the buffer — if the new pos is within it, we reuse it.
 }
 
-// ── Internal byte fetch ───────────────────────────────────────────────────────
+// ── Internal byte fetch with 64 KB read-ahead buffer ─────────────────────────
+
+void FileStream::fill_buffer() {
+    if (buf_.empty()) buf_.resize(BUFFER_SIZE);
+    buf_start_ = pos_;
+    int64_t to_read = std::min(end_ - pos_, static_cast<int64_t>(BUFFER_SIZE));
+    if (std::fseek(file_.get(), static_cast<long>(pos_), SEEK_SET) != 0)
+        throw std::runtime_error("FileStream: fseek failed");
+    buf_size_ = static_cast<int64_t>(
+        std::fread(buf_.data(), 1, static_cast<size_t>(to_read), file_.get()));
+}
 
 uint8_t FileStream::fetch_byte() {
-    if (pos_ >= end_) {
+    if (pos_ >= end_)
         throw std::runtime_error("FileStream: read past end of stream");
-    }
-    if (std::fseek(file_.get(), static_cast<long>(pos_), SEEK_SET) != 0) {
-        throw std::runtime_error("FileStream: fseek failed");
-    }
-    int c = std::fgetc(file_.get());
-    if (c == EOF) {
-        throw std::runtime_error("FileStream: unexpected EOF");
-    }
+    int64_t off = pos_ - buf_start_;
+    if (off < 0 || off >= buf_size_)
+        fill_buffer(), off = 0;
     ++pos_;
-    return static_cast<uint8_t>(c);
+    return buf_[static_cast<size_t>(off)];
 }
 
 // ── Primitive reads ───────────────────────────────────────────────────────────
@@ -94,17 +100,28 @@ int32_t FileStream::read_unsigned_short() {
 }
 
 void FileStream::read_fully(uint8_t* buf, size_t n) {
-    if (pos_ + static_cast<int64_t>(n) > end_) {
+    if (pos_ + static_cast<int64_t>(n) > end_)
         throw std::runtime_error("FileStream::read_fully: request exceeds stream bounds");
+    // Serve as much as possible from the read-ahead buffer, then fread the rest.
+    int64_t off = pos_ - buf_start_;
+    int64_t buffered = (off >= 0 && off < buf_size_) ? buf_size_ - off : 0;
+    if (buffered > 0) {
+        size_t from_buf = std::min(static_cast<size_t>(buffered), n);
+        std::memcpy(buf, buf_.data() + static_cast<size_t>(off), from_buf);
+        pos_ += static_cast<int64_t>(from_buf);
+        buf  += from_buf;
+        n    -= from_buf;
     }
-    if (std::fseek(file_.get(), static_cast<long>(pos_), SEEK_SET) != 0) {
-        throw std::runtime_error("FileStream: fseek failed");
+    if (n > 0) {
+        if (std::fseek(file_.get(), static_cast<long>(pos_), SEEK_SET) != 0)
+            throw std::runtime_error("FileStream: fseek failed");
+        size_t got = std::fread(buf, 1, n, file_.get());
+        if (got != n)
+            throw std::runtime_error("FileStream::read_fully: short read");
+        pos_ += static_cast<int64_t>(n);
+        buf_start_ = -1;  // buffer is now stale
+        buf_size_  = 0;
     }
-    size_t got = std::fread(buf, 1, n, file_.get());
-    if (got != n) {
-        throw std::runtime_error("FileStream::read_fully: short read");
-    }
-    pos_ += static_cast<int64_t>(n);
 }
 
 void FileStream::read_fully(std::vector<uint8_t>& buf, size_t n) {

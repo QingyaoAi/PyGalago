@@ -25,11 +25,13 @@ Usage
 from __future__ import annotations
 
 import argparse
+import bisect
 import math
 import os
 import random
 import sys
 import time
+from array import array as _array
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -49,9 +51,10 @@ from pygalago.eval.run         import write_run, Run, RankedDoc
 INDEX        = "/Users/Aqy/Documents/Graduate_study/CIIR/Project/robust04.index"
 PART         = "postings.porter"          # Porter2-stemmed (matches paper)
 STEMMER_NAME = "porter"                   # must match PART
-TITLES_TSV   = os.path.join(INDEX, "queries", "rob04.titles.tsv")
-DESCS_TSV    = os.path.join(INDEX, "queries", "rob04.descs.tsv")
-QRELS_FILE   = os.path.join(INDEX, "queries", "robust04.qrels")
+_QUERIES_DIR = "/Users/Aqy/Documents/Graduate_study/CIIR/Project/robust04-complete-index/queries"
+TITLES_TSV   = os.path.join(_QUERIES_DIR, "rob04.titles.tsv")
+DESCS_TSV    = os.path.join(_QUERIES_DIR, "rob04.descs.tsv")
+QRELS_FILE   = os.path.join(_QUERIES_DIR, "robust04.qrels")
 
 N         = 1000    # documents to retrieve per query
 MU        = 2500    # Dirichlet prior (Galago / paper default)
@@ -164,226 +167,120 @@ def to_ranked_docs(results: List[Tuple[str, float]]) -> List[RankedDoc]:
     return [RankedDoc(name, score, i) for i, (name, score) in enumerate(results, 1)]
 
 
-# ── QL (Dirichlet-smoothed Query Likelihood) ──────────────────────────────────
+# ── QL (Dirichlet-smoothed Query Likelihood) — C++ DAAT ──────────────────────
 
-def ql_search(stemmed_terms: List[str], pr, ls, C: int,
+def ql_search(stemmed_terms: List[str], idx, ls,
               n: int = N, mu: float = MU) -> List[Tuple[int, float]]:
-    """DAAT Dirichlet QL over posting lists for stemmed query terms."""
-    term_info: List[Tuple[float, object]] = []
-    for term in dict.fromkeys(stemmed_terms):
-        s = pr.get_stats(term)
-        if s is None:
-            continue
-        it = pr.get_postings(term)
-        if it is None:
-            continue
-        term_info.append((s["collection_count"] / C, it))
-
-    if not term_info:
-        return []
-
-    doc_tfs: Dict[int, Dict[int, int]] = defaultdict(dict)
-    for i, (_, it) in enumerate(term_info):
-        for doc_id, tf in it:
-            doc_tfs[doc_id][i] = tf
-
-    term_ps = [p for p, _ in term_info]
-    scored: List[Tuple[int, float]] = []
-    for doc_id, tfs in doc_tfs.items():
-        dl    = ls.length(doc_id)
-        denom = dl + mu
-        score = sum(
-            math.log((tfs.get(i, 0) + mu * p) / denom)
-            for i, p in enumerate(term_ps)
-        )
-        scored.append((doc_id, score))
-
-    scored.sort(key=lambda x: -x[1])
-    return scored[:n]
+    """Delegate to the C++ DAAT QL implementation for full speed."""
+    results = g.ql_search(idx, ls, list(dict.fromkeys(stemmed_terms)),
+                           mu=mu, n=n, part=PART)
+    return [(sd.document, sd.score) for sd in results]
 
 
-# ── WSDM-Int (IDF-weighted Dirichlet QL, unigram component) ──────────────────
+# ── WSDM-Int (IDF-weighted Dirichlet QL) — C++ DAAT ──────────────────────────
 
-def wsdm_search(stemmed_terms: List[str], pr, ls, C: int, N_DOCS: int,
+def wsdm_search(stemmed_terms: List[str], idx, pr, ls, N_DOCS: int,
                 n: int = N, mu: float = MU) -> List[Tuple[int, float]]:
-    """IDF-weighted Dirichlet QL (WSDM-Int unigram approximation).
+    """IDF-weighted Dirichlet QL via C++ DAAT (WSDM-Int unigram component).
 
     w_t = log((N+1)/(df_t+0.5)), normalised to sum to 1.
-    This is the unigram component of WSDM-Int (Bendersky et al. 2010).
-    The full model also adds ordered/unordered bigram features; those
-    require position lists and are not included here.
     """
-    term_info: List[Tuple[float, float, object]] = []
+    weighted: List[Tuple[str, float]] = []
     for term in dict.fromkeys(stemmed_terms):
         s = pr.get_stats(term)
         if s is None:
             continue
-        it = pr.get_postings(term)
-        if it is None:
-            continue
-        p_t = s["collection_count"] / C
         idf = math.log((N_DOCS - s["document_count"] + 0.5) / (s["document_count"] + 0.5))
-        term_info.append((p_t, idf, it))
-
-    if not term_info:
+        if idf > 0:
+            weighted.append((term, idf))
+    if not weighted:
         return []
-
-    total_idf = sum(idf for _, idf, _ in term_info)
-
-    doc_tfs: Dict[int, Dict[int, int]] = defaultdict(dict)
-    for i, (_, _, it) in enumerate(term_info):
-        for doc_id, tf in it:
-            doc_tfs[doc_id][i] = tf
-
-    scored: List[Tuple[int, float]] = []
-    for doc_id, tfs in doc_tfs.items():
-        dl    = ls.length(doc_id)
-        denom = dl + mu
-        score = sum(
-            (idf / total_idf) * math.log((tfs.get(i, 0) + mu * p_t) / denom)
-            for i, (p_t, idf, _) in enumerate(term_info)
-        )
-        scored.append((doc_id, score))
-
-    scored.sort(key=lambda x: -x[1])
-    return scored[:n]
+    results = g.ql_search_weighted(idx, ls, weighted, mu=mu, n=n, part=PART)
+    return [(sd.document, sd.score) for sd in results]
 
 
 # ── SDM (Sequential Dependence Model) ────────────────────────────────────────
 
-def _od_counts(it1, it2, window: int = 1) -> Dict[int, int]:
-    """Count ordered windows (#od:1) for two posting iterators.
-
-    An ordered window of width 1 fires when term2 appears at position
-    (pos1 + 1) in the same document — i.e. they are adjacent in order.
-    """
-    counts: Dict[int, int] = defaultdict(int)
-    for doc_id, positions1 in it1:
-        # Fast-forward it2 to this document
-        pass
-    return counts
+_SDM_PREFETCH = 5000  # QL pre-filter depth for 2-stage SDM
 
 
-def _collect_positions(it) -> Dict[int, List[int]]:
-    """Read a positional posting iterator into {docid: [pos, ...]}."""
-    result: Dict[int, List[int]] = {}
-    for doc_id, positions in it:
-        result[doc_id] = list(positions)
-    return result
-
-
-def sdm_search(stemmed_terms: List[str], pr, ls, C: int,
+def sdm_search(stemmed_terms: List[str], idx, pr, ls, C: int,
                uni_w: float = SDM_UNI, od_w: float = SDM_OD,
                uw_w: float = SDM_UW, win: int = SDM_WIN,
                n: int = N, mu: float = MU) -> List[Tuple[int, float]]:
-    """Sequential Dependence Model.
+    """Two-stage Sequential Dependence Model.
 
-    Score = uni_w * QL_uni + od_w * Σ QL_od(t_i,t_{i+1})
-                           + uw_w * Σ QL_uw(t_i,t_{i+1})
+    Stage 1  — QL pre-filter retrieves _SDM_PREFETCH candidates.
+    Stage 2  — positional re-scoring with unigram + ordered (#od:1) +
+               unordered (#uw:win) bigram features from read_positions_for.
+    Falls back to QL results when fewer than 2 unique terms or when the index
+    has no positional data.
 
-    The bigram features use proximity posting lists when available.
-    Falls back to count-only (skip bigrams) when positional data is absent.
+    Score = uni_w*QL_uni + od_w*Σ QL_od(t_i,t_{i+1}) + uw_w*Σ QL_uw(t_i,t_{i+1})
     """
     terms = list(dict.fromkeys(stemmed_terms))
     if not terms:
         return []
 
-    # ── Unigram component ──────────────────────────────────────────────────────
-    uni_info: List[Tuple[float, object]] = []
-    for term in terms:
-        s = pr.get_stats(term)
-        if s is None:
-            continue
-        it = pr.get_postings(term)
-        if it is None:
-            continue
-        uni_info.append((s["collection_count"] / C, it))
+    if len(terms) < 2:
+        return ql_search(stemmed_terms, idx, ls, n=n, mu=mu)
 
-    # Check if positional postings are available
-    has_positions = False
-    if uni_info:
-        # Probe first term
-        probe = pr.get_postings(terms[0])
-        if probe is not None:
-            try:
-                sample = list(probe)
-                if sample and isinstance(sample[0][1], (list, tuple)):
-                    has_positions = True
-            except Exception:
-                pass
+    # ── Stage 1: QL pre-filter ─────────────────────────────────────────────────
+    ql_results = ql_search(stemmed_terms, idx, ls, n=_SDM_PREFETCH, mu=mu)
+    if not ql_results:
+        return []
 
-    # Without positions, SDM degrades to QL (bigrams unavailable)
-    if not has_positions or len(terms) < 2:
-        return ql_search(stemmed_terms, pr, ls, C, n=n, mu=mu)
+    candidate_ids = sorted(doc_id for doc_id, _ in ql_results)
 
-    # ── Collect positional data for all terms ──────────────────────────────────
+    # ── Stage 2: positional data for candidates only ───────────────────────────
     term_stats: List[Tuple[float, Dict[int, List[int]]]] = []
     for term in terms:
         s = pr.get_stats(term)
-        if s is None:
-            term_stats.append((0.0, {}))
-            continue
-        p_t = s["collection_count"] / C
-        it = pr.get_postings(term)
-        doc_positions: Dict[int, List[int]] = {}
-        if it is not None:
-            for doc_id, positions in it:
-                doc_positions[doc_id] = list(positions)
-        term_stats.append((p_t, doc_positions))
+        p_t = s["collection_count"] / C if s else 0.0
+        pos_data = pr.read_positions_for(term, candidate_ids)
+        doc_pos  = {doc_id: positions for doc_id, positions in pos_data}
+        term_stats.append((p_t, doc_pos))
 
-    # ── Collect all candidate documents ───────────────────────────────────────
-    all_docs: set = set()
-    for _, dp in term_stats:
-        all_docs.update(dp.keys())
+    if not any(bool(dp) for _, dp in term_stats):
+        return ql_results[:n]   # index has no positional data
 
-    if not all_docs:
-        return []
-
-    # ── Score each document ───────────────────────────────────────────────────
+    # ── Stage 3: SDM re-scoring of candidates ─────────────────────────────────
     scored: List[Tuple[int, float]] = []
-    for doc_id in all_docs:
+    for doc_id in candidate_ids:
         dl    = ls.length(doc_id)
         denom = dl + mu
 
-        # Unigram QL sum
+        # Unigram QL (tf = len(positions))
         uni_score = sum(
-            math.log((len(dp.get(doc_id, [])) + mu * p_t) / denom)
+            math.log(max(len(dp.get(doc_id, [])) + mu * p_t, 1e-300) / denom)
             for p_t, dp in term_stats
         )
 
-        # Bigram scores over adjacent term pairs
         od_score = 0.0
         uw_score = 0.0
         for i in range(len(terms) - 1):
-            p1, dp1 = term_stats[i]
-            p2, dp2 = term_stats[i + 1]
+            _, dp1 = term_stats[i]
+            _, dp2 = term_stats[i + 1]
             pos1 = dp1.get(doc_id, [])
             pos2 = dp2.get(doc_id, [])
 
-            # Ordered window (#od:1): t2 immediately follows t1
-            set2 = set(pos2)
+            # #od:1 — term2 immediately follows term1
+            set2  = set(pos2)
             od_tf = sum(1 for p in pos1 if (p + 1) in set2)
 
-            # Unordered window (#uw:win): both within a window of `win` tokens
-            set1 = set(pos1)
-            uw_tf = sum(
-                1 for p in pos2
-                if any(abs(p - q) <= win and p != q for q in
-                       (p2 for p2 in pos1 if abs(p - p2) <= win))
-            )
-            # Simpler approximation: count positions in pos1 within win of any pos2
+            # #uw:win — both terms within win positions (bisect for O(n log m))
             uw_tf = 0
             for p in pos1:
-                if any(abs(p - q) < win for q in pos2):
+                lo = bisect.bisect_left(pos2,  p - win + 1)
+                hi = bisect.bisect_right(pos2, p + win - 1)
+                if lo < hi:
                     uw_tf += 1
 
-            # Use collection bigram frequency as background (fallback: product)
-            cf_bigram = max(od_tf, 1) / C  # crude estimate; improve if cf available
+            cf_bigram = max(od_tf, 1) / C
             od_score += math.log((od_tf + mu * cf_bigram) / denom)
             uw_score += math.log((uw_tf + mu * cf_bigram) / denom)
 
-        total = uni_w * uni_score + od_w * od_score + uw_w * uw_score
-        scored.append((doc_id, total))
+        scored.append((doc_id, uni_w * uni_score + od_w * od_score + uw_w * uw_score))
 
     scored.sort(key=lambda x: -x[1])
     return scored[:n]
@@ -422,50 +319,103 @@ def build_rm3_vocab(index_path: str, part: str, pr, C: int,
 # ── Weighted QL (for RM3 re-query) ───────────────────────────────────────────
 
 def weighted_ql_search(term_weights: List[Tuple[str, float]], pr, ls, C: int,
-                       n: int = N, mu: float = MU) -> List[Tuple[int, float]]:
-    term_info: List[Tuple[float, float, object]] = []
+                       n: int = N, mu: float = MU,
+                       cache_doc_ids=None,
+                       cache_tfs=None) -> List[Tuple[int, float]]:
+    """Weighted Dirichlet QL.  Accepts optional pre-cached posting arrays to
+    avoid pybind11 overhead for rm3_vocab terms (see build_rm3_cache)."""
+    valid: List[Tuple[float, float, object, object]] = []  # (w, p_t, ids, tfs)
     for term, w in term_weights:
-        s  = pr.get_stats(term)
+        s = pr.get_stats(term)
         if s is None:
             continue
-        it = pr.get_postings(term)
-        if it is None:
-            continue
-        term_info.append((w, s["collection_count"] / C, it))
+        p_t = s["collection_count"] / C
+        if cache_doc_ids is not None and term in cache_doc_ids:
+            valid.append((w, p_t, cache_doc_ids[term], cache_tfs[term]))
+        else:
+            it = pr.get_postings(term)
+            if it is None:
+                continue
+            valid.append((w, p_t, it, None))   # None → iterate it directly
 
-    if not term_info:
+    if not valid:
         return []
 
-    doc_tfs: Dict[int, Dict[int, int]] = defaultdict(dict)
-    for i, (_, _, it) in enumerate(term_info):
-        for doc_id, tf in it:
-            doc_tfs[doc_id][i] = tf
+    total_w   = math.fsum(w for w, _, _, _ in valid)
+    log_mu_pt = [math.log(mu * p_t) for _, p_t, _, _ in valid]
+    sum_w_lmp = math.fsum(w * lmp for (w, _, _, _), lmp in zip(valid, log_mu_pt))
+
+    corrections: Dict[int, float] = defaultdict(float)
+    for (w, p_t, ids, tfs), lmp in zip(valid, log_mu_pt):
+        if tfs is not None:
+            # Cached arrays — Python zip, no C++ round-trip
+            for doc_id, tf in zip(ids, tfs):
+                corrections[doc_id] += w * (math.log(tf + mu * p_t) - lmp)
+        else:
+            # Live PostingsIterator
+            for doc_id, tf in ids:
+                corrections[doc_id] += w * (math.log(tf + mu * p_t) - lmp)
 
     scored: List[Tuple[int, float]] = []
-    for doc_id, tfs in doc_tfs.items():
-        dl    = ls.length(doc_id)
-        denom = dl + mu
-        score = sum(
-            w * math.log((tfs.get(i, 0) + mu * p_t) / denom)
-            for i, (w, p_t, _) in enumerate(term_info)
-        )
-        scored.append((doc_id, score))
+    for doc_id, corr in corrections.items():
+        scored.append((doc_id,
+                       sum_w_lmp + corr - total_w * math.log(ls.length(doc_id) + mu)))
 
     scored.sort(key=lambda x: -x[1])
     return scored[:n]
+
+
+# ── RM3 vocab cache ───────────────────────────────────────────────────────────
+
+def build_rm3_cache(rm3_vocab: List[Tuple[str, float]], pr):
+    """Pre-load the fixed rm3_vocab posting lists into compact Python arrays.
+
+    Called once before the query loop.  Per-query RM3 then uses bisect
+    instead of skip_to, cutting pybind11 round-trips from ~5 000/query to ~5.
+
+    Returns (cache_doc_ids, cache_tfs): dicts mapping term → array.
+    """
+    print("Building RM3 posting cache … ", end="", flush=True)
+    t0 = time.perf_counter()
+
+    cache_doc_ids: Dict[str, object] = {}
+    cache_tfs:     Dict[str, object] = {}
+
+    for term, _ in rm3_vocab:
+        it = pr.get_postings(term)
+        if it is None:
+            continue
+        dids: List[int] = []
+        tfs:  List[int] = []
+        for doc_id, tf in it:
+            dids.append(doc_id)
+            tfs.append(tf)
+        if dids:
+            cache_doc_ids[term] = _array('q', dids)
+            cache_tfs[term]     = _array('i', tfs)
+
+    print(f"{len(cache_doc_ids):,} terms cached ({time.perf_counter()-t0:.1f}s)")
+    return cache_doc_ids, cache_tfs
 
 
 # ── RM3 ───────────────────────────────────────────────────────────────────────
 
 def rm3_search(stemmed_terms: List[str],
                rm3_vocab: List[Tuple[str, float]],
-               pr, ls, C: int,
+               idx, pr, ls, C: int,
                n: int = N, mu: float = MU,
                fb_docs: int = FB_DOCS,
                fb_terms: int = FB_TERMS,
-               lam: float = RM3_LAM) -> List[Tuple[int, float]]:
-    """RM3: initial QL → relevance model → interpolated re-query."""
-    initial = ql_search(stemmed_terms, pr, ls, C, n=fb_docs, mu=mu)
+               lam: float = RM3_LAM,
+               cache_doc_ids=None,
+               cache_tfs=None) -> List[Tuple[int, float]]:
+    """RM3: initial QL → relevance model → interpolated re-query.
+
+    When cache_doc_ids/cache_tfs (from build_rm3_cache) are provided, TF
+    lookup for the fixed rm3_vocab terms uses bisect on pre-loaded arrays
+    instead of skip_to, which is ~100x faster per query.
+    """
+    initial = ql_search(stemmed_terms, idx, ls, n=fb_docs, mu=mu)
     if not initial:
         return []
 
@@ -489,22 +439,34 @@ def rm3_search(stemmed_terms: List[str],
 
     p_t_R: Dict[str, float] = {}
     for term, p_t in all_vocab.items():
-        it = pr.get_postings(term)
-        if it is None:
-            continue
-        contrib = 0.0
-        for fb_id in fb_ids:
-            it.skip_to(fb_id)
-            tf = it.count if (not it.is_done and it.doc_id == fb_id) else 0
-            contrib += fb_w[fb_id] * (tf + mu * p_t) / (fb_dl[fb_id] + mu)
+        if cache_doc_ids is not None and term in cache_doc_ids:
+            # Cached path: bisect lookup, no C++ round-trip per feedback doc
+            dids = cache_doc_ids[term]
+            tfs  = cache_tfs[term]
+            contrib = 0.0
+            for fb_id in fb_ids:
+                idx = bisect.bisect_left(dids, fb_id)
+                tf  = tfs[idx] if idx < len(dids) and dids[idx] == fb_id else 0
+                contrib += fb_w[fb_id] * (tf + mu * p_t) / (fb_dl[fb_id] + mu)
+        else:
+            # Uncached path (query terms): use skip_to as before
+            it = pr.get_postings(term)
+            if it is None:
+                continue
+            contrib = 0.0
+            for fb_id in fb_ids:
+                it.skip_to(fb_id)
+                tf = it.count if (not it.is_done and it.doc_id == fb_id) else 0
+                contrib += fb_w[fb_id] * (tf + mu * p_t) / (fb_dl[fb_id] + mu)
+
         if contrib > 0.0:
             p_t_R[term] = contrib
 
     if not p_t_R:
         return ql_search(stemmed_terms, pr, ls, C, n=n, mu=mu)
 
-    q_len  = max(len(stemmed_terms), 1)
-    p_t_q  = {t: 1.0 / q_len for t in stemmed_terms}
+    q_len = max(len(stemmed_terms), 1)
+    p_t_q = {t: 1.0 / q_len for t in stemmed_terms}
 
     all_terms = set(p_t_R) | set(p_t_q)
     rm3_raw   = {
@@ -518,7 +480,9 @@ def rm3_search(stemmed_terms: List[str],
         return ql_search(stemmed_terms, pr, ls, C, n=n, mu=mu)
     top_norm = [(t, w / total_w) for t, w in top]
 
-    return weighted_ql_search(top_norm, pr, ls, C, n=n, mu=mu)
+    return weighted_ql_search(top_norm, pr, ls, C, n=n, mu=mu,
+                               cache_doc_ids=cache_doc_ids,
+                               cache_tfs=cache_tfs)
 
 
 # ── Main experiment ───────────────────────────────────────────────────────────
@@ -538,6 +502,7 @@ def run_experiment(queries_type: str = "titles", output_path: Optional[str] = No
     print(f"Index part: {PART}  Stemmer: {STEMMER_NAME}")
 
     rm3_vocab = build_rm3_vocab(INDEX, PART, pr, C)
+    rm3_cache_doc_ids, rm3_cache_tfs = build_rm3_cache(rm3_vocab, pr)
 
     bm25_retrieval = Retrieval(INDEX, b=BM25_B, k=BM25_K, part=PART,
                                 stemmer=STEMMER_NAME)
@@ -570,25 +535,27 @@ def run_experiment(queries_type: str = "titles", output_path: Optional[str] = No
 
         # ── QL ───────────────────────────────────────────────────────────────
         t0 = time.perf_counter()
-        res_ql = resolve(ql_search(stemmed, pr, ls, C), idx)
+        res_ql = resolve(ql_search(stemmed, idx, ls), idx)
         timing["QL"] += time.perf_counter() - t0
         runs["QL"][topic] = to_ranked_docs(res_ql)
 
         # ── SDM ──────────────────────────────────────────────────────────────
         t0 = time.perf_counter()
-        res_sdm = resolve(sdm_search(stemmed, pr, ls, C), idx)
+        res_sdm = resolve(sdm_search(stemmed, idx, pr, ls, C), idx)
         timing["SDM"] += time.perf_counter() - t0
         runs["SDM"][topic] = to_ranked_docs(res_sdm)
 
         # ── WSDM (IDF-weighted QL unigrams) ──────────────────────────────────
         t0 = time.perf_counter()
-        res_wsdm = resolve(wsdm_search(stemmed, pr, ls, C, N_DOCS), idx)
+        res_wsdm = resolve(wsdm_search(stemmed, idx, pr, ls, N_DOCS), idx)
         timing["WSDM"] += time.perf_counter() - t0
         runs["WSDM"][topic] = to_ranked_docs(res_wsdm)
 
         # ── RM3 ──────────────────────────────────────────────────────────────
         t0 = time.perf_counter()
-        res_rm3 = resolve(rm3_search(stemmed, rm3_vocab, pr, ls, C), idx)
+        res_rm3 = resolve(rm3_search(stemmed, rm3_vocab, idx, pr, ls, C,
+                                     cache_doc_ids=rm3_cache_doc_ids,
+                                     cache_tfs=rm3_cache_tfs), idx)
         timing["RM3"] += time.perf_counter() - t0
         runs["RM3"][topic] = to_ranked_docs(res_rm3)
 
